@@ -1072,8 +1072,15 @@ class OccultationsTab(ttk.Frame):
                             stored_rows.append((f"{body} \u2014 {ep_str}", tab[j]))
                     except Exception as ex:
                         logger.error("Prediction corps=%s : %s", body, ex, exc_info=True)
+                        hint = ""
+                        err_s = str(ex)
+                        if "404" in err_s and "vizier" in err_s.lower():
+                            hint = (
+                                "\n(Note NPOAP : CDS Strasbourg /viz-bin/votable en 404 — "
+                                "bascule vers miroirs IDIA / Harvard ; relancez si besoin.)"
+                            )
                         parts.append(
-                            f"\n{'=' * 72}\n  Corps : {body} \u2014 ERREUR\n{'=' * 72}\n{ex}\n"
+                            f"\n{'=' * 72}\n  Corps : {body} \u2014 ERREUR\n{'=' * 72}\n{ex}{hint}\n"
                         )
 
                 txt = "".join(parts).lstrip("\n")

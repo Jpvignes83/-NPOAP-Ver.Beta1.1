@@ -70,7 +70,14 @@ CATALOG_GLADE = "VIII/100/glade4"
 
 _DEFAULT_RADIUS_ARCSEC = 40.0
 
-_VIZIER_MIRRORS = ("vizier.cds.unistra.fr", "vizier.hia.nrc.ca")
+# Miroirs CDS (IDIA / Harvard) en premier — Strasbourg /viz-bin/votable parfois 404.
+_VIZIER_MIRRORS = (
+    "vizier.idia.ac.za",
+    "vizier.cfa.harvard.edu",
+    "vizier.nao.ac.jp",
+    "vizier.hia.nrc.ca",
+    "vizier.cds.unistra.fr",
+)
 
 
 @dataclass

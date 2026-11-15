@@ -95,6 +95,14 @@ def run_occultation_prediction(
     from sora.observer import Observer
     from sora.prediction import prediction
 
+    # CDS Strasbourg (/viz-bin/votable) peut renvoyer 404 : bascule miroir avant SORA.
+    try:
+        from core.vizier_mirrors import ensure_astroquery_vizier_mirror
+
+        ensure_astroquery_vizier_mirror()
+    except Exception:
+        pass
+
     body = (body or "").strip()
     if not body:
         raise ValueError("Indiquez un corps (nom ou numéro).")
