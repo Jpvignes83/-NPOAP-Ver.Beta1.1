@@ -54,6 +54,7 @@ from astroquery.jplhorizons import Horizons
 # --- 8. MODULES LOCAUX ---
 import config
 # --- NOUVEAU : Import du module d'astrométrie optimisé ---
+from core import fast_astrometry as _fast_astrometry
 from core.fast_astrometry import (
     FastAstrometrySolver,
     GaiaCache,
@@ -64,22 +65,8 @@ from core.fast_astrometry import (
     gaia_box_radius_for_imaging_fov,
     calculate_astrometric_statistics,
     open_fits_with_fixed_wcs,
+    refresh_gpu_detection,
 )
-# Tentative d'import CuPy pour GPU (Exception : ImportError, ou AttributeError si
-# importlib.metadata renvoie des distributions sans metadata — cf. cupy._detect_duplicate_installation)
-try:
-    import warnings as _warnings_cupy
-    with _warnings_cupy.catch_warnings():
-        _warnings_cupy.filterwarnings("ignore", message=".*CUDA path could not be detected.*", category=UserWarning)
-        import cupy as cp
-    HAS_GPU = True
-    try:
-        cp.cuda.is_available()
-    except Exception:
-        HAS_GPU = False
-except Exception:
-    HAS_GPU = False
-    cp = None
 # Détection KBMOD : exécutée via WSL (pas d'import kbmod sous Windows)
 from utils.wsl_utils import windows_path_to_wsl
 try:
@@ -546,8 +533,9 @@ class AsteroidPhotometryTab:
         self.annulus_inner_var = tk.DoubleVar(value=12.0)
         self.annulus_outer_var = tk.DoubleVar(value=20.0)
 
-        # Option GPU
-        self.use_gpu_var = tk.BooleanVar(value=False)
+        # Option GPU / CUDA (état initial depuis la détection CuPy)
+        self.use_gpu_var = tk.BooleanVar(value=bool(_fast_astrometry.HAS_GPU))
+        self._gpu_status_var = tk.StringVar(value="")
         
         # Méthode d'astrométrie
         self.astrometry_method_var = tk.StringVar(value="zero_aperture")  # "zero_aperture" ou "classical"
@@ -718,6 +706,9 @@ class AsteroidPhotometryTab:
         self.image_info_label = ttk.Label(nav_frame, text="Aucune image chargée", foreground="gray")
         self.image_info_label.pack(pady=1)
 
+        # Panneau GPU / CUDA bien visible (astrométrie accélérée)
+        self._build_gpu_cuda_panel(ast_control_frame)
+
         traj_json_ast_frame = ttk.LabelFrame(
             ast_control_frame,
             text="Trajectoire (positions mesurées)",
@@ -779,14 +770,9 @@ class AsteroidPhotometryTab:
         for i, (txt, var) in enumerate(params):
             ttk.Label(ast_frame, text=txt).grid(row=i, column=0, sticky="w", padx=5, pady=0)
             ttk.Entry(ast_frame, textvariable=var, width=6).grid(row=i, column=1, padx=5, pady=0)
-        
-        # Option GPU
-        gpu_status = "✅ Disponible" if HAS_GPU else "❌ Non disponible"
-        ttk.Label(ast_frame, text=f"GPU: {gpu_status}", foreground="green" if HAS_GPU else "gray", font=("Helvetica", 8)).grid(row=4, column=0, sticky="w", padx=5, pady=0)
-        ttk.Checkbutton(ast_frame, text="Utiliser GPU", variable=self.use_gpu_var, state="normal" if HAS_GPU else "disabled").grid(row=4, column=1, padx=5, pady=0)
 
         # Sélection de la méthode d'astrométrie
-        ttk.Label(ast_frame, text="Méthode:").grid(row=5, column=0, sticky="w", padx=5, pady=1)
+        ttk.Label(ast_frame, text="Méthode:").grid(row=4, column=0, sticky="w", padx=5, pady=1)
         
         # Création d'un combobox avec valeurs lisibles et mapping interne
         method_display_map = {
@@ -799,7 +785,7 @@ class AsteroidPhotometryTab:
                                    values=method_display_values,
                                    state="readonly", width=25)
         method_combo.current(0)  # Sélectionner "Zero-Aperture" par défaut
-        method_combo.grid(row=5, column=1, padx=5, pady=1, sticky="w")
+        method_combo.grid(row=4, column=1, padx=5, pady=1, sticky="w")
         
         # Synchroniser la sélection avec la variable interne
         def on_method_change(event=None):
@@ -812,7 +798,7 @@ class AsteroidPhotometryTab:
         
         # Labels explicatifs pour chaque méthode
         method_labels_frame = ttk.Frame(ast_frame)
-        method_labels_frame.grid(row=6, column=0, columnspan=2, padx=5, pady=0, sticky="w")
+        method_labels_frame.grid(row=5, column=0, columnspan=2, padx=5, pady=0, sticky="w")
         
         zero_ap_label = ttk.Label(method_labels_frame, 
                                   text="• Zero-Aperture: Extrapolation (plusieurs ouvertures, plus précis)",
@@ -825,9 +811,9 @@ class AsteroidPhotometryTab:
         classical_label.pack(anchor="w")
 
         # Bouton unique pour lancer l'astrométrie
-        ttk.Button(ast_frame, text="🧭 Lancer l'Astrométrie", command=self.run_single_astrometry_with_method).grid(row=7, column=0, columnspan=2, pady=2)
-        ttk.Button(ast_frame, text="🧭 Batch Astrométrie (Thread)", command=self._batch_astrometry_worker).grid(row=8, column=0, columnspan=2, pady=2)
-        ttk.Button(ast_frame, text="📋 Tableau ZA (6 ouvertures)", command=self.open_zero_aperture_table).grid(row=9, column=0, columnspan=2, pady=2)
+        ttk.Button(ast_frame, text="🧭 Lancer l'Astrométrie", command=self.run_single_astrometry_with_method).grid(row=6, column=0, columnspan=2, pady=2)
+        ttk.Button(ast_frame, text="🧭 Batch Astrométrie (Thread)", command=self._batch_astrometry_worker).grid(row=7, column=0, columnspan=2, pady=2)
+        ttk.Button(ast_frame, text="📋 Tableau ZA (6 ouvertures)", command=self.open_zero_aperture_table).grid(row=8, column=0, columnspan=2, pady=2)
 
         traj_json_photo_frame = ttk.LabelFrame(
             photo_control_frame,
@@ -1054,6 +1040,86 @@ class AsteroidPhotometryTab:
         ttk.Button(toolbar_btns, text="Sauver", command=self.toolbar.save_figure, width=8).pack(side=tk.LEFT, padx=2, pady=1)
         self.canvas.mpl_connect("button_press_event", self.on_image_click)
         logger.info("Photométrie astéroïdes : interface prête.")
+
+    def _build_gpu_cuda_panel(self, parent):
+        """Panneau visible GPU/CUDA pour activer l'accélération d'astrométrie."""
+        gpu_frame = ttk.LabelFrame(parent, text="Accélération GPU (CUDA)")
+        gpu_frame.pack(fill=tk.X, pady=(4, 2), ipady=2)
+
+        self._gpu_status_label = tk.Label(
+            gpu_frame,
+            textvariable=self._gpu_status_var,
+            font=("Helvetica", 9, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=280,
+        )
+        self._gpu_status_label.pack(fill=tk.X, padx=6, pady=(4, 2))
+
+        row = ttk.Frame(gpu_frame)
+        row.pack(fill=tk.X, padx=6, pady=(0, 4))
+
+        self._gpu_check = ttk.Checkbutton(
+            row,
+            text="Utiliser GPU (CUDA)",
+            variable=self.use_gpu_var,
+        )
+        self._gpu_check.pack(side=tk.LEFT)
+
+        ttk.Button(
+            row,
+            text="Actualiser",
+            width=10,
+            command=self._refresh_gpu_cuda_ui,
+        ).pack(side=tk.RIGHT)
+
+        ttk.Label(
+            gpu_frame,
+            text="Accélère la détection d'étoiles (CuPy). Nécessite carte NVIDIA + CUDA + cupy-cuda12x.",
+            font=("Helvetica", 8),
+            foreground="gray",
+            wraplength=280,
+        ).pack(anchor="w", padx=6, pady=(0, 4))
+
+        self._refresh_gpu_cuda_ui()
+
+    def _refresh_gpu_cuda_ui(self):
+        """Met à jour statut GPU/CUDA et active la case à cocher si CUDA est utilisable."""
+        info = refresh_gpu_detection()
+        available = bool(info.get("available"))
+        device = (info.get("device_name") or "").strip()
+        cupy_ver = (info.get("cupy_version") or "").strip()
+        cuda_path = (info.get("cuda_path") or "").strip()
+
+        if available:
+            status = f"CUDA disponible — {device or 'GPU NVIDIA'}"
+            if cupy_ver:
+                status += f" (CuPy {cupy_ver})"
+            color = "#0a7a2f"
+            self.use_gpu_var.set(True)
+            try:
+                self._gpu_check.state(["!disabled"])
+            except Exception:
+                pass
+        else:
+            status = str(info.get("message") or "GPU CUDA non disponible")
+            if cuda_path:
+                status += f"\nCUDA_PATH={cuda_path}"
+            else:
+                status += "\nInstallez CUDA Toolkit + : pip install cupy-cuda12x"
+            color = "#8a6d00"
+            self.use_gpu_var.set(False)
+            try:
+                self._gpu_check.state(["disabled"])
+            except Exception:
+                pass
+
+        self._gpu_status_var.set(status)
+        try:
+            self._gpu_status_label.configure(fg=color)
+        except Exception:
+            pass
+        logger.info("GPU/CUDA UI : %s", status.replace("\n", " | "))
 
     def _start_process_log_capture(self, process_label: str):
         """Réservé (ancien journal intégré supprimé) ; les logs restent via le logger standard."""
@@ -3270,7 +3336,7 @@ class AsteroidPhotometryTab:
                     max_sources=max_sources,
                     match_radius=match_radius,
                     mag_limit=mag_limit,
-                    use_gpu=self.use_gpu_var.get() and HAS_GPU  # Option GPU depuis l'interface
+                    use_gpu=self.use_gpu_var.get() and bool(_fast_astrometry.HAS_GPU)
                 )
                 logger.debug(f"Appel de fast_solver.solve avec skip_zero_aperture={skip_zero_aperture}")
                 wcs_fitted, zero_rms, stats = fast_solver.solve(data, header, skip_zero_aperture=skip_zero_aperture, extrapolation_params=extrapolation_params)

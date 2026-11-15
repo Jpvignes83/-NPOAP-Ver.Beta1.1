@@ -17,11 +17,12 @@ Optimisations:
 """
 
 import logging
+import os
 import pickle
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 
 import numpy as np
 from scipy.spatial import KDTree
@@ -43,27 +44,97 @@ from astroquery.vizier import Vizier
 
 logger = logging.getLogger(__name__)
 
-# Tentative d'import CuPy pour GPU
-try:
-    # Supprimer l'avertissement CuPy concernant CUDA_PATH si CUDA n'est pas configuré
-    import warnings
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*CUDA path could not be detected.*", category=UserWarning)
-        import cupy as cp
-    HAS_GPU = True
-    # Vérifier si CUDA est réellement disponible
+
+def _ensure_cuda_path_env() -> Optional[str]:
+    """Renseigne CUDA_PATH si le toolkit NVIDIA est installé mais non exporté."""
+    existing = (os.environ.get("CUDA_PATH") or "").strip()
+    if existing and Path(existing).is_dir():
+        return existing
+    toolkit_root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    if toolkit_root.is_dir():
+        versions = sorted(
+            [p for p in toolkit_root.iterdir() if p.is_dir() and p.name.startswith("v")],
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        for candidate in versions:
+            if (candidate / "bin").is_dir():
+                os.environ["CUDA_PATH"] = str(candidate)
+                return str(candidate)
+    return existing or None
+
+
+def probe_cuda_gpu() -> Dict[str, Any]:
+    """
+    Détecte CuPy + CUDA runtime.
+
+    Retourne un dict : available, device_name, cupy_version, cuda_path, message.
+    """
+    info: Dict[str, Any] = {
+        "available": False,
+        "device_name": "",
+        "cupy_version": "",
+        "cuda_path": _ensure_cuda_path_env() or "",
+        "message": "GPU CUDA non disponible",
+        "cp": None,
+    }
     try:
-        cp.cuda.is_available()
-        logger.debug("CuPy installé et CUDA disponible")
-    except Exception:
-        HAS_GPU = False
-        logger.debug("CuPy installé mais CUDA non disponible - utilisation CPU")
-except Exception as e:
-    # ImportError si absent ; AttributeError/RuntimeError possibles si site-packages
-    # incohérent (ex. metadata None dans _detect_duplicate_installation).
-    HAS_GPU = False
-    cp = None
-    logger.debug("CuPy indisponible (%s) — astrométrie en CPU uniquement", type(e).__name__)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*CUDA path could not be detected.*",
+                category=UserWarning,
+            )
+            import cupy as _cp
+        info["cupy_version"] = getattr(_cp, "__version__", "")
+        info["cp"] = _cp
+        try:
+            cuda_ok = bool(_cp.cuda.is_available())
+        except Exception as exc:
+            info["message"] = f"CuPy présent mais CUDA inaccessible ({type(exc).__name__})"
+            return info
+        if not cuda_ok:
+            info["message"] = "CuPy installé — runtime CUDA indisponible"
+            return info
+        try:
+            props = _cp.cuda.runtime.getDeviceProperties(0)
+            name = props.get("name", b"") if isinstance(props, dict) else getattr(props, "name", b"")
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace")
+            info["device_name"] = str(name).strip() or "GPU NVIDIA"
+        except Exception:
+            info["device_name"] = "GPU NVIDIA"
+        info["available"] = True
+        info["message"] = f"CUDA OK — {info['device_name']}"
+        return info
+    except Exception as exc:
+        # ImportError si absent ; AttributeError/RuntimeError si site-packages incohérent
+        info["message"] = f"CuPy indisponible ({type(exc).__name__})"
+        return info
+
+
+_gpu_probe = probe_cuda_gpu()
+HAS_GPU = bool(_gpu_probe["available"])
+GPU_DEVICE_NAME = str(_gpu_probe.get("device_name") or "")
+GPU_STATUS_MESSAGE = str(_gpu_probe.get("message") or "")
+cp = _gpu_probe.get("cp")
+if HAS_GPU:
+    logger.debug("CuPy %s — %s", _gpu_probe.get("cupy_version"), GPU_STATUS_MESSAGE)
+else:
+    logger.debug("%s — astrométrie en CPU uniquement", GPU_STATUS_MESSAGE)
+
+
+def refresh_gpu_detection() -> Dict[str, Any]:
+    """Relance la détection CUDA (pour l'UI) et met à jour HAS_GPU / cp."""
+    global HAS_GPU, GPU_DEVICE_NAME, GPU_STATUS_MESSAGE, cp, _gpu_probe
+    _gpu_probe = probe_cuda_gpu()
+    HAS_GPU = bool(_gpu_probe["available"])
+    GPU_DEVICE_NAME = str(_gpu_probe.get("device_name") or "")
+    GPU_STATUS_MESSAGE = str(_gpu_probe.get("message") or "")
+    cp = _gpu_probe.get("cp")
+    return dict(_gpu_probe)
+
+
 warnings.filterwarnings("ignore", category=AstropyWarning)
 Vizier.server = 'http://vizier.cfa.harvard.edu/'
 

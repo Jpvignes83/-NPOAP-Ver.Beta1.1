@@ -81,6 +81,26 @@ if /i "%NPOAP_ALLOW_USERSITE%"=="1" (
 REM Backend Prospector: WSL par defaut (FSPS Linux), surchargeable via variable d'environnement.
 if not defined NPOAP_PROSPECTOR_BACKEND set "NPOAP_PROSPECTOR_BACKEND=wsl"
 
+REM CUDA_PATH pour CuPy / acceleration GPU (si toolkit NVIDIA installe)
+if not defined CUDA_PATH (
+    if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+)
+if not defined CUDA_PATH (
+    if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1"
+)
+if not defined CUDA_PATH (
+    if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
+)
+if not defined CUDA_PATH (
+    if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5\bin" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5"
+)
+if not defined CUDA_PATH (
+    if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2"
+)
+if not defined CUDA_PATH (
+    if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8"
+)
+
 if not exist "main.py" (
     echo Erreur: main.py non trouve dans %CD%
     pause
