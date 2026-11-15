@@ -1,0 +1,81 @@
+# -*- coding: utf-8 -*-
+# NPOAP - Requirements
+# Nouvelle Plateforme d'Observation et d'Analyse Photometrique
+#
+# Encodage: UTF-8 uniquement. Ne pas enregistrer en UTF-16 sous le Bloc-notes Windows.
+#
+# Environnement de référence : Python 3.11.x (voir README_INSTALLATION). Python 3.12+ non validé en masse sur NPOAP.
+
+# === DEPENDANCES CORE (REQUISES) ===
+
+# Calcul scientifique
+numpy>=2.4.0,<2.5
+scipy>=1.17.1,<1.18
+pandas>=1.5.0
+
+# Astronomie
+astropy>=7.2.0,<7.3
+photutils[all]>=1.6.0
+ccdproc>=2.4.0
+astroscrappy>=1.1.0
+astride>=0.3.1
+astroquery>=0.4.6
+reproject>=0.8
+
+# Visualisation
+matplotlib>=3.10.0,<3.11
+
+# Services / utilitaires
+requests>=2.33.0
+Pillow>=12.1.0
+pytz>=2024.1
+
+# Domaines NPOAP
+sora-astro>=0.3.2
+emcee>=3.1.0
+# PHOEBE2 : sous Windows, souvent Microsoft Visual C++ Build Tools (voir README_INSTALLATION).
+phoebe>=2.4.22,<2.5
+reportlab>=3.6.0
+pylightcurve>=4.0.0
+wotan>=1.9
+exotethys>=1.0.0
+# exoclock : HOPS, éphémérides de nuit (ExoClock), repli catalogue si HTTP planets_json indisponible
+exoclock
+# batman-package : modèle de transit utilisé par le workflow ExoPlanetPie natif
+# (core/exoplanetpie_pipeline.py + onglet Photométrie Exoplanètes).
+batman-package>=2.4.9
+h5py>=3.0.0  # lecture Gladeplus.h5 (GLADE+) dans core/glade_alert_targets.py — déposer le .h5 sous %USERPROFILE%\.npoap\catalogues\
+click>=8.0.0
+statsmodels>=0.13.0
+specutils>=1.12.0
+stdpipe
+synphot
+lightkurve>=2.4.0
+
+# AWS : s3fs → aiobotocore impose botocore 1.42.x ; éviter que boto3 1.43+ force botocore 1.43 (conflit pip).
+boto3>=1.42.0,<1.43
+botocore>=1.42.90,<1.42.92
+
+# Cosmologie SNe Ia (transitoires : SALT2/SALT3 via sncosmo)
+# Bandes Gaia (G, G_Bp, G_Rp) : voir core/sncosmo_sn_ia.py (gaia::g, gaia::gbp, gaia::grp).
+sncosmo>=2.10,<3
+iminuit>=2.0
+
+# PARSEC / amas (GitHub, pas sur PyPI)
+git+https://github.com/mfouesneau/ezpadova
+
+# Prospector : ne pas installer depuis PyPI (mauvais paquet ; sedpy PyPI incomplet).
+# Installation : voir README_INSTALLATION.md ; sedpy et prospector depuis GitHub (bd-j), pas PyPI.
+dynesty>=2.0.0
+dill>=0.3.0
+
+# Optionnels avancés
+rebound>=3.20.0
+ultranest>=0.7.0
+
+# KBMOD : Windows natif souvent problématique — préférer WSL (docs/INSTALL_KBMOD_WSL.md)
+# kbmod @ git+https://github.com/dirac-institute/kbmod.git
+
+# CuPy / CUDA — décommenter selon la version CUDA installée
+# cupy-cuda11x>=11.0.0
+# cupy-cuda12x>=12.0.0

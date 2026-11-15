@@ -1,0 +1,1324 @@
+"""SHOBS-FLUX: Shiloh Hill Observatory Optical System Characterization.
+
+The window: a blue sidebar with the six pages, a white card in the middle, the status strip with the busy bar at the
+bottom (SHOBS House Style, as SHOBS-SCHED). Milestone 0.1 (M1) brings the Check image page, the Profiles page and
+the foundation every later page stands on; 0.2–0.3 add the Camera page (bench and dark runs), 0.4 the Sky page
+(on-sky runs), 0.5 the History page (trend plots, PNG / CSV export, the system report) and profile roll-back.
+
+Start it with the Desktop shortcut (Create shortcuts.bat), run_windows.bat, or `python flux_app.py`."""
+from __future__ import annotations
+
+import math
+import os
+import queue
+import sys
+import threading
+import traceback
+import tkinter as tk
+from datetime import date
+from tkinter import filedialog, simpledialog, ttk
+from tkinter import font as tkfont
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, APP_DIR)
+
+import credits as cr          # noqa: E402
+import history                # noqa: E402
+import settings               # noqa: E402
+import shobs_profile as sp    # noqa: E402
+import style                  # noqa: E402
+from style import px          # noqa: E402
+
+APP_USER_MODEL_ID = "ShilohHill.SHOBS-FLUX"
+PAGES = ("Check image", "Camera", "Sky", "Profiles", "History")
+SUBTITLES = {
+    "Check image": "Open one frame: photon counts, saturation, the sky and the stars, judged against your camera's "
+                   "values. Every number says where it came from.",
+    "Camera": "Bench runs: flat pairs and bias frames → gain, read noise, full well, linearity; darks → dark "
+              "current, hot pixels, edge glow (per color for one-shot-color cameras), against the maker's spec.",
+    "Sky": "Learns from your nights (SHOBS-P's on-sky logs or a folder of lights): zero point, extinction, seeing, "
+           "sky brightness, scintillation and cadence per band, judging each night, into your system profile.",
+    "Profiles": "The camera and system profiles SHOBS-P and SHOBS-SCHED read, value by value with its source.",
+    "History": "Any value of any setup over time, from the runs in FLUX's history; export the plot or its numbers, and "
+               "make a system report of a telescope + camera.",
+}
+SOURCE_TAG = {"measured": "measured", "header": "header", "spec": "spec", "estimate": "estimate", "user": "you",
+              "derived": "worked out", "none": "—"}
+
+
+def set_app_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def follow_wrap(label, container, pad: int = 0, least: int = 200) -> None:
+    def on(e):
+        try:
+            label.configure(wraplength=max(least, int(e.width) - pad))
+        except tk.TclError:
+            pass
+    container.bind("<Configure>", on, add="+")
+
+
+def set_msg(var: tk.StringVar, label, text: str) -> None:
+    var.set(text or "")
+    try:
+        label.configure(style=style.status_style(style.kind_of(text)) if text else "Card.TLabel")
+    except tk.TclError:
+        pass
+
+
+def open_folder(path: str) -> None:
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)                 # noqa: S606
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.Popen(["open", path])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", path])
+    except Exception as exc:
+        settings.log(f"open folder {path}: {exc!r}")
+
+
+class Jobs:
+    """Work in a thread, its result back on the main thread (Tk is not thread-safe); every job shows on the busy bar
+    with its words, step by step (House Style)."""
+
+    def __init__(self, root):
+        self.root = root
+        self.q: queue.Queue = queue.Queue()
+        self.active = 0
+        self._poll()
+
+    def run(self, work, done, label: str):
+        """work(step) runs in a thread (step("words") changes the busy bar's words); done(result, exc) runs here."""
+        self.active += 1
+        bar = self.root.busy_bar
+        tok = bar.begin(label + "…")
+
+        def step(text):
+            self.q.put(("words", tok, str(text).rstrip(".…") + "…"))
+
+        def target():
+            try:
+                self.q.put(("done", (done, tok), (work(step), None)))
+            except Exception as exc:
+                settings.log(f"{label} failed: {exc!r}\n{traceback.format_exc()}")
+                self.q.put(("done", (done, tok), (None, exc)))
+
+        threading.Thread(target=target, daemon=True).start()
+
+    def _poll(self):
+        try:
+            while True:
+                kind, a, b = self.q.get_nowait()
+                if kind == "words":
+                    self.root.busy_bar.words(a, b)
+                    continue
+                done, tok = a
+                self.active -= 1
+                self.root.busy_bar.end(tok)
+                try:
+                    done(*b)
+                except Exception:
+                    self.root.report_callback_exception(*sys.exc_info())
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(60, self._poll)
+        except tk.TclError:
+            pass
+
+    def wait(self, timeout: float = 60.0) -> bool:
+        """Tests: pump the event loop until no job is running."""
+        import time
+        t0 = time.time()
+        while self.active and time.time() - t0 < timeout:
+            self.root.update()
+            time.sleep(0.02)
+        self.root.update()
+        return not self.active
+
+
+# ---- Check image ---------------------------------------------------------------------------------------------------
+
+class CheckPage:
+    title = "Check image"
+
+    def __init__(self, app: "App", parent):
+        self.app = app
+        self.res = None
+        self.selected = None
+        self.frame = ttk.Frame(parent, style="Card.TFrame")
+        top = ttk.Frame(self.frame, style="Card.TFrame")
+        top.pack(fill=tk.X)
+        self.open_btn = style.green_button(top, "Open frame…", self.choose)
+        self.open_btn.pack(side=tk.LEFT)
+        self.recheck_btn = ttk.Button(top, text="Check again", command=self.recheck, state="disabled")
+        self.recheck_btn.pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        self.path_var = tk.StringVar(value="No frame open. Any FITS or XISF frame: a light, or a flat, bias or dark.")
+        ttk.Label(top, textvariable=self.path_var, style="Hint.TLabel").pack(side=tk.LEFT, padx=px(app, 10))
+        self.save_btn = style.green_button(top, "Save as starting camera profile", self.save_profile)
+        self.msg_var = tk.StringVar()
+        self.msg = ttk.Label(self.frame, textvariable=self.msg_var, style="Card.TLabel")
+        self.msg.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
+
+        pane = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, pady=(px(app, 6), 0))
+        left = ttk.Frame(pane, style="Card.TFrame")
+        right = ttk.Frame(pane, style="Card.TFrame")
+        pane.add(left, weight=3)
+        pane.add(right, weight=2)
+
+        # the frame picture (matplotlib, made on first use so the window opens fast) takes the height the star panel
+        # leaves; the star panel sits right under the picture and is as tall as its rows (fit_picture)
+        self.left = left
+        self.pic_holder = ttk.Frame(left, style="Card.TFrame")
+        self.pic_holder.pack(side=tk.TOP, fill=tk.X)
+        self.star_box = ttk.Frame(left, style="Card.TFrame")
+        self.star_box.pack(side=tk.TOP, fill=tk.X)
+        left.bind("<Configure>", lambda _e: self.fit_picture(), add="+")
+        self.pic_hint = ttk.Label(self.pic_holder, text="The frame shows here, its stars ringed: blue ✔ under the "
+                                  "linear limit, amber ⚠ over it, red ✖ saturated. Click a star to see its numbers.",
+                                  style="Hint.TLabel", justify=tk.LEFT)
+        self.pic_hint.pack(anchor="nw", pady=px(app, 8))
+        follow_wrap(self.pic_hint, self.pic_holder, px(app, 10))
+        self.canvas = None
+        self.fig = None
+
+        # findings
+        ttk.Label(right, text="Findings", style="Section.TLabel").pack(anchor="w")
+        tf = ttk.Frame(right, style="Card.TFrame")
+        tf.pack(fill=tk.BOTH, expand=True)
+        self.text = tk.Text(tf, wrap="word", font=style.font(10), background="#ffffff", foreground=style.TEXT,
+                            relief="flat", padx=px(app, 6), pady=px(app, 4), height=12, cursor="arrow")
+        vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.text.yview)
+        self.text.configure(yscrollcommand=vb.set)
+        vb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text.tag_configure("bad", foreground=style.BAD)
+        self.text.tag_configure("warn", foreground=style.WARN_FG, background=style.WARN_BG)
+        self.text.tag_configure("ok", foreground=style.OK)
+        self.text.tag_configure("info", foreground=style.TEXT)
+        self.text.tag_configure("gap", spacing1=px(app, 4))
+        self.text.configure(state="disabled")
+
+        # camera values in use
+        ttk.Label(right, text="Camera values in use", style="Section.TLabel").pack(anchor="w", pady=(px(app, 8), 0))
+        self.cam_tree = ttk.Treeview(right, columns=("value", "source"), show="tree headings", height=8,
+                                     selectmode="none")
+        self.cam_tree.heading("#0", text="")
+        self.cam_tree.heading("value", text="Value")
+        self.cam_tree.heading("source", text="Source")
+        self.cam_tree.column("#0", width=px(app, 130), stretch=False)
+        self.cam_tree.column("value", width=px(app, 140), anchor="e")
+        self.cam_tree.column("source", width=px(app, 120))
+        self.cam_tree.pack(fill=tk.X)
+
+        # one star (under the picture)
+        ttk.Label(self.star_box, text="Star", style="Section.TLabel").pack(anchor="w", pady=(px(app, 6), 0))
+        self.star_tree = ttk.Treeview(self.star_box, columns=("v", "l2", "v2"), show="tree", height=1,
+                                      selectmode="none")
+        self.star_tree.column("#0", width=px(app, 140), minwidth=px(app, 100))
+        self.star_tree.column("v", width=px(app, 190), minwidth=px(app, 120))
+        self.star_tree.column("l2", width=px(app, 150), minwidth=px(app, 100))
+        self.star_tree.column("v2", width=px(app, 150), minwidth=px(app, 100))
+        self.star_tree.pack(fill=tk.X)
+
+    def refresh(self):
+        pass
+
+    # ---- actions
+    def choose(self):
+        start = self.app.prefs.get("last_folder") or os.path.expanduser("~")
+        path = filedialog.askopenfilename(
+            parent=self.app, title="Open a frame", initialdir=start if os.path.isdir(start) else None,
+            filetypes=[("FITS or XISF frames", "*.fit *.fits *.fts *.xisf *.FIT *.FITS *.FTS *.XISF"),
+                       ("All files", "*.*")])
+        if path:
+            self.app.prefs["last_folder"] = os.path.dirname(path)
+            settings.save(self.app.prefs)
+            self.check(path)
+
+    def recheck(self):
+        if self.res is not None:
+            self.check(self.res.path)
+
+    def check(self, path: str, keep_msg: bool = False):
+        import image_check
+        if not keep_msg:
+            set_msg(self.msg_var, self.msg, "")
+        self.path_var.set(os.path.basename(path))
+        self.open_btn.configure(state="disabled")
+        self.recheck_btn.configure(state="disabled")
+        fill = dict(self.app.prefs.get("header_answers") or {})
+
+        def work(step):
+            return image_check.check_image(path, step=step, fill=fill)
+
+        self.app.jobs.run(work, self.checked, f"Checking {os.path.basename(path)}")
+
+    def checked(self, res, exc):
+        self.open_btn.configure(state="normal")
+        if self.res is not None or res is not None:
+            self.recheck_btn.configure(state="normal")
+        if exc is not None:
+            import frames
+            why = str(exc) if isinstance(exc, frames.FrameError) else f"{type(exc).__name__}: {exc}"
+            set_msg(self.msg_var, self.msg, f"✖ This frame could not be checked: {why}.")
+            self.app.set_status(f"✖ Check image failed ({why}). Details are in {settings.log_path()}.")
+            return
+        self.res = res
+        self.selected = None
+        self.recheck_btn.configure(state="normal")
+        self.show_lines()
+        self.show_camera()
+        self.draw()
+        self.show_star(None)
+        if res.cam.profile_path:
+            self.save_btn.pack_forget()
+        else:
+            self.save_btn.pack(side=tk.RIGHT)
+        worst = res.status
+        key = history.record_run(
+            "check", res.path, res.summary, camera_id=res.cam.cam_id, n_frames=1, status=worst,
+            app=settings.WRITTEN_BY)
+        settings.log(f"checked {res.path} ({worst}; run {key})")
+        n_bad = sum(1 for _k, t in res.lines if t.lstrip().startswith("✖"))
+        n_warn = sum(1 for _k, t in res.lines if t.lstrip().startswith("⚠"))
+        flags = ", ".join(x for x in (f"{n_bad} ✖" if n_bad else "", f"{n_warn} ⚠" if n_warn else "") if x)
+        self.app.set_status(f"Checked {os.path.basename(res.path)}: {len(res.stars)} stars measured"
+                            + (f"; {flags} in the findings." if flags else "; nothing needs action."))
+
+    def show_lines(self):
+        t = self.text
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        for i, (kind, line) in enumerate(self.res.lines):
+            t.insert("end", line + "\n", (kind, "gap") if i else (kind,))
+        t.configure(state="disabled")
+
+    def show_camera(self):
+        import instrument
+        tr = self.cam_tree
+        tr.delete(*tr.get_children())
+        cam = self.res.cam
+        for key, (label, unit) in instrument.CAMERA_KEYS.items():
+            rec = cam.records.get(key) or {}
+            v = rec.get("value")
+            src = rec.get("source", "none")
+            if key == "bias_level_adu" and v is None:
+                v, src = self.res.bias[0], self.res.bias[1]
+            if v is None:
+                txt = "not known"
+            elif isinstance(v, float) and abs(v) < 0.1:
+                txt = f"{v:.4g} {unit}"
+            elif isinstance(v, (int, float)):
+                txt = f"{v:,.4g} {unit}" if abs(v) < 1000 else f"{v:,.0f} {unit}"
+            else:
+                txt = f"{v} {unit}"
+            tr.insert("", "end", text=label, values=(txt.replace("fraction", "").strip(), SOURCE_TAG.get(src, src)))
+
+    def draw(self):
+        res = self.res
+        if res is None or res.preview is None:
+            return
+        if self.canvas is None:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            self.pic_hint.pack_forget()
+            # no fixed size: the canvas asks for almost nothing and then fills its holder, following every resize
+            self.fig = Figure(dpi=100, facecolor=style.CARD)      # matplotlib follows the screen scaling itself
+            self.ax = self.fig.add_axes((0.0, 0.0, 1.0, 1.0))
+            self.canvas = FigureCanvasTkAgg(self.fig, master=self.pic_holder)
+            widget = self.canvas.get_tk_widget()
+            widget.configure(width=1, height=1, background=style.CARD, highlightthickness=0)
+            widget.pack(fill=tk.BOTH, expand=True)
+            self.canvas.mpl_connect("button_press_event", self.on_click)
+        self.disp_f = draw_frame(self.ax, res, self.selected)
+        self.fit_picture()
+        self.canvas.draw_idle()
+
+    def fit_picture(self):
+        """Give the picture all the height the star panel leaves, but no more than the frame's shape can use at this
+        width, so the star panel sits right under the picture (no empty band between them). Follows every resize;
+        the work is done once the window is idle (sizes are settled then)."""
+        if self.canvas is None or getattr(self, "_fit_pending", False):
+            return
+        self._fit_pending = True
+        try:
+            self.app.after_idle(self._fit_now)
+        except tk.TclError:
+            self._fit_pending = False
+
+    def _fit_now(self):
+        self._fit_pending = False
+        if self.canvas is None or self.res is None or self.res.preview is None:
+            return
+        try:
+            w, h = self.left.winfo_width(), self.left.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+            ih, iw = self.res.preview.shape[:2]
+            avail = h - self.star_box.winfo_reqheight()
+            want = max(px(self.app, 60), min(avail, int(round(w * ih / max(iw, 1)))))
+            if abs(int(self.pic_holder.cget("height") or 0) - want) > 1:
+                self.pic_holder.pack_propagate(False)
+                self.pic_holder.configure(height=want)
+        except tk.TclError:
+            pass
+
+    def on_click(self, event):
+        if self.res is None or event.xdata is None or event.inaxes is None:
+            return
+        import image_check
+        x, y = event.xdata * self.disp_f, event.ydata * self.disp_f
+        st = image_check.star_near(self.res, x, y, max_d=max(25.0, 12.0 * self.disp_f))
+        if st is None:
+            st = image_check.measure_at(self.res, x, y)
+        if st is None:
+            set_msg(self.msg_var, self.msg, "⚠ No star there: click on a star.")
+            return
+        set_msg(self.msg_var, self.msg, "")
+        self.selected = st
+        self.show_star(st)
+        self.draw()
+
+    def show_star(self, st):
+        import image_check
+        tr = self.star_tree
+        tr.delete(*tr.get_children())
+        if st is None:
+            tr.insert("", "end", text="", values=("Click a star on the frame.", "", ""))
+            tr.configure(height=1)
+            self.fit_picture()
+            return
+        rows = [(f"Star #{st.n}", "")] + image_check.star_detail(self.res, st)
+        half = (len(rows) + 1) // 2
+        for i in range(half):
+            a = rows[i]
+            b = rows[half + i] if half + i < len(rows) else ("", "")
+            tr.insert("", "end", text=a[0], values=(a[1], b[0], b[1]))
+        tr.configure(height=min(max(half, 1), STAR_ROWS_MAX))
+        self.fit_picture()
+
+    def save_profile(self):
+        import instrument
+        res = self.res
+        if res is None:
+            return
+        s = res.cam.setup
+        if not s.get("instrume"):
+            name = simpledialog.askstring(settings.APP_NAME, "The frame's header does not name the camera "
+                                          "(INSTRUME). What is it called? (asked once; used for frames without it)",
+                                          parent=self.app)
+            if not name or not name.strip():
+                return
+            self.app.prefs.setdefault("header_answers", {})["INSTRUME"] = name.strip()
+            settings.save(self.app.prefs)
+            self.check(res.path)
+            return
+        doc = instrument.starting_camera_profile(res.cam, res.frame.header, settings.WRITTEN_BY)
+        if os.path.exists(sp.profile_path("cameras", doc["profile_id"])):
+            set_msg(self.msg_var, self.msg, "⚠ A camera profile with this name already exists: see the Profiles page.")
+            return
+        try:
+            path = sp.save_profile(doc, settings.WRITTEN_BY)
+        except (sp.ProfileError, OSError) as exc:
+            set_msg(self.msg_var, self.msg, f"✖ The profile could not be saved ({exc}).")
+            return
+        settings.log(f"saved starting camera profile {path}")
+        set_msg(self.msg_var, self.msg, f"✔ Saved camera profile {doc['profile_id']}. Its values are labelled "
+                                        "header / spec / estimate until bench runs measure them; type your own on "
+                                        "the Profiles page.")
+        self.check(res.path, keep_msg=True)
+
+
+STAR_ROWS_MAX = 7          # the star panel grows to this many rows, then scrolls
+RING_COLORS = {"ok": style.OK, "warn": "#e0a100", "bad": style.BAD}
+
+
+def draw_frame(ax, res, selected=None) -> int:
+    """Draw the checked frame on a matplotlib axes: the picture (block-averaged to at most ~1400 px across, the
+    gentle stretch of image_check.display_stretch), each measured star ringed in its status color with its number
+    beside the ring, and the selected star ringed in yellow. Display only. Returns the block size (frame pixels per
+    picture pixel)."""
+    import image_check
+    from matplotlib import patheffects
+    img = res.preview
+    f = max(1, int(math.ceil(max(img.shape) / 1400)))
+    h, w = img.shape[0] // f * f, img.shape[1] // f * f
+    small = img[:h, :w].reshape(h // f, f, w // f, f).mean(axis=(1, 3))
+    z = image_check.display_stretch(small, read_noise_limited=getattr(res, "read_noise_limited", False))
+    ax.clear()
+    ax.imshow(z, cmap="gray", origin="lower", interpolation="antialiased", vmin=0.0, vmax=1.0)
+    ax.set_aspect("equal")
+    ax.set_anchor("N")                      # spare room (a frame wider than its holder) goes below the picture
+    ax.set_axis_off()
+    halo = [patheffects.withStroke(linewidth=3.0, foreground="#000000")]
+    hgt, wid = z.shape
+    for st in res.stars:
+        r = max(3.0, st.r95 / f)
+        cx, cy = st.x / f, st.y / f
+        color = RING_COLORS.get(st.status, style.OK)
+        ax.add_patch(_circle((cx, cy), r, color, 1.2))
+        # the number sits off the ring's upper-right edge, a few points clear of it whatever the zoom; near the
+        # right or top edge of the frame it moves to the other side so it is never cut off
+        sx = -1 if cx > 0.94 * wid else 1
+        sy = -1 if cy > 0.94 * hgt else 1
+        ax.annotate(str(st.n), xy=(cx + sx * 0.71 * r, cy + sy * 0.71 * r), xytext=(sx * 2.5, sy * 2.5),
+                    textcoords="offset points", ha="left" if sx > 0 else "right",
+                    va="bottom" if sy > 0 else "top", color=_light(color), fontsize=9.5, fontweight="bold",
+                    path_effects=halo, annotation_clip=True)
+    if selected is not None:
+        ax.add_patch(_circle((selected.x / f, selected.y / f), max(6.0, selected.r95 / f * 1.6), "#ffd54f", 2.0))
+    ax.set_xlim(-0.5, z.shape[1] - 0.5)
+    ax.set_ylim(-0.5, z.shape[0] - 0.5)
+    return f
+
+
+def _light(color: str) -> str:
+    """A lighter version of a ring color for the star numbers, so they read on the dark halo."""
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#{:02x}{:02x}{:02x}".format(*(int(c + (255 - c) * 0.45) for c in (r, g, b)))
+
+
+def _circle(xy, r, color, lw):
+    from matplotlib.patches import Circle
+    return Circle(xy, r, fill=False, edgecolor=color, linewidth=lw)
+
+
+# ---- Profiles ------------------------------------------------------------------------------------------------------
+
+class ProfilesPage:
+    title = "Profiles"
+
+    def __init__(self, app: "App", parent):
+        self.app = app
+        self.frame = ttk.Frame(parent, style="Card.TFrame")
+        top = ttk.Frame(self.frame, style="Card.TFrame")
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Profile", style="Card.TLabel").pack(side=tk.LEFT)
+        self.pick_var = tk.StringVar()
+        self.pick = ttk.Combobox(top, textvariable=self.pick_var, state="readonly", width=60)
+        self.pick.pack(side=tk.LEFT, padx=px(app, 8))
+        self.pick.bind("<<ComboboxSelected>>", lambda _e: self.show())
+        self.set_btn = style.green_button(top, "Set a value…", self.set_value)
+        self.set_btn.pack(side=tk.LEFT)
+        ttk.Button(top, text="Spec curves…", command=self.spec_curves).pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        self.roll_btn = ttk.Button(top, text="Roll back…", command=self.roll_back)
+        self.roll_btn.pack(side=tk.LEFT, padx=(px(app, 8), 0))
+
+        ttk.Button(top, text="Open the data folder", command=lambda: open_folder(sp.data_dir())).pack(side=tk.RIGHT)
+        row2 = ttk.Frame(self.frame, style="Card.TFrame")
+        row2.pack(fill=tk.X, pady=(px(app, 6), 0))
+        self.export_btn = ttk.Button(row2, text="Copy for AstroImageJ / EXOTIC / HOPS…", command=self.copy_for_tools)
+        self.export_btn.pack(side=tk.LEFT)
+        ttk.Label(row2, text="this profile's camera values and plate scale, in each program's own field names",
+                  style="Hint.TLabel").pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        self.msg_var = tk.StringVar()
+        self.msg = ttk.Label(self.frame, textvariable=self.msg_var, style="Card.TLabel")
+        self.msg.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
+        self.info_var = tk.StringVar()
+        info = ttk.Label(self.frame, textvariable=self.info_var, style="Hint.TLabel", justify=tk.LEFT)
+        info.pack(anchor="w", fill=tk.X)
+        follow_wrap(info, self.frame, px(app, 10))
+        tf = ttk.Frame(self.frame, style="Card.TFrame")
+        tf.pack(fill=tk.BOTH, expand=True, pady=(px(app, 6), 0))
+        cols = ("value", "unit", "source", "date", "note")
+        self.tree = ttk.Treeview(tf, columns=cols, show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="Name")
+        for c, w in zip(cols, (110, 90, 100, 100, 420)):
+            self.tree.heading(c, text=c.capitalize())
+            self.tree.column(c, width=px(app, w), anchor="e" if c == "value" else "w", stretch=(c == "note"))
+        self.tree.column("#0", width=px(app, 260), stretch=False)
+        vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vb.set)
+        vb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        hint = ttk.Label(self.frame, style="Hint.TLabel", justify=tk.LEFT,
+                         text="Spec curves… shows, types, imports and exports the maker's curves. Every save keeps "
+                              "the previous revision; Roll back… puts an earlier one back (as a new revision, so a "
+                              "roll-back can be undone too). Copy for AstroImageJ / EXOTIC / HOPS… copies this "
+                              "profile's gain, read noise, dark current, linear limit, saturation and plate scale "
+                              "in those programs' own words.")
+        hint.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
+        follow_wrap(hint, self.frame, px(app, 10))
+        self.paths: dict[str, str] = {}
+        self.doc = None
+        self.rec_paths: dict[str, tuple] = {}
+
+    def refresh(self):
+        self.paths = {}
+        for kind, word in (("cameras", "Camera"), ("systems", "System"), ("specs", "Spec")):
+            for p in sp.list_profiles(kind):
+                self.paths[f"{word}: {os.path.basename(p)[:-5]}"] = p
+        names = list(self.paths)
+        self.pick.configure(values=names)
+        if self.pick_var.get() not in self.paths:
+            self.pick_var.set(names[0] if names else "")
+        if not names:
+            self.info_var.set(f"No profiles yet in {sp.data_dir()}. Check a frame and use “Save as starting camera "
+                              "profile”, or put profile files in the cameras / systems / specs folders.")
+        self.show()
+
+    def show(self):
+        tr = self.tree
+        tr.delete(*tr.get_children())
+        self.rec_paths = {}
+        path = self.paths.get(self.pick_var.get())
+        self.doc = None
+        if not path:
+            return
+        try:
+            doc = sp.load(path)
+        except sp.ProfileError as exc:
+            set_msg(self.msg_var, self.msg, f"✖ {os.path.basename(path)} cannot be read: {exc}.")
+            return
+        self.doc = (path, doc)
+        probs = sp.validate(doc)
+        set_msg(self.msg_var, self.msg, ("⚠ " + "; ".join(probs[:3])) if probs else "")
+        hist = sp.history_of(os.path.basename(os.path.dirname(path)), os.path.basename(path)[:-5])
+        bits = [f"{doc.get('format')} v{doc.get('format_version')}"]
+        if doc.get("revision"):
+            bits.append(f"revision {doc['revision']}")
+        if doc.get("updated"):
+            bits.append(f"updated {doc['updated']}")
+        if doc.get("written_by"):
+            bits.append(f"by {doc['written_by']}")
+        rb = doc.get("rolled_back")
+        if isinstance(rb, dict) and rb.get("to_revision") is not None and rb.get("as_revision") == doc.get("revision"):
+            bits.append(f"rolled back to revision {rb['to_revision']} on {str(rb.get('on') or '')[:10]}")
+        bits.append(f"{len(hist)} earlier revision{'s' if len(hist) != 1 else ''} kept")
+        self.info_var.set(" · ".join(bits) + f"\n{path}")
+        if doc.get("format") == sp.SPEC_FORMAT:
+            for name, pts in (doc.get("curves") or {}).items():
+                if name == "x":
+                    continue
+                tr.insert("", "end", text=name, values=(f"{len(pts)} points", "", "spec", doc.get("entered", ""),
+                                                        doc.get("source", "")))
+            dc = (doc.get("dark_current_curve") or {}).get("points")
+            if dc:
+                tr.insert("", "end", text="dark current by temperature", values=(
+                    f"{len(dc)} points", "e-/px/s", "spec", doc.get("entered", ""), doc.get("source", "")))
+            return
+        import rollback
+        parents: dict = {}
+        for rpath, rec in sp.iter_records(doc):
+            parent = ""
+            for i in range(len(rpath) - 1):
+                key = ".".join(str(p) for p in rpath[: i + 1])
+                if key not in parents:
+                    parents[key] = tr.insert(parent, "end", text=str(rpath[i]), open=True)
+                parent = parents[key]
+            v = rec.get("value")
+            iid = tr.insert(parent, "end", text=rollback.VALUE_NAMES.get(str(rpath[-1]), str(rpath[-1])), values=(
+                "—" if v is None else (rollback.number_words(v) if isinstance(v, (int, float)) else str(v)),
+                rec.get("unit") or "",
+                SOURCE_TAG.get(rec.get("source"), rec.get("source")), rec.get("date") or "", rec.get("note") or ""))
+            self.rec_paths[iid] = rpath
+
+    def copy_for_tools(self):
+        """Copy the chosen profile's values for AstroImageJ, EXOTIC and HOPS to the clipboard, and show them (with
+        Save as .txt…)."""
+        if not self.doc or self.doc[1].get("format") not in (sp.CAMERA_FORMAT, sp.SYSTEM_FORMAT):
+            set_msg(self.msg_var, self.msg, "⚠ Pick a camera or system profile first.")
+            return
+        import tool_export
+        doc = self.doc[1]
+        try:
+            text = tool_export.text(doc)
+        except Exception as exc:                        # never a crash on a profile with odd values
+            settings.log(f"export for AstroImageJ / EXOTIC / HOPS failed: {exc!r}")
+            set_msg(self.msg_var, self.msg, f"✖ The values could not be put together ({exc}).")
+            return
+        copied = copy_text(self.app, text)
+        old = getattr(self, "export_dialog", None)
+        if old is not None:                              # one export window at a time
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+        self.export_dialog = ExportDialog(self.app, doc, text, copied)
+        set_msg(self.msg_var, self.msg, ("✔ Copied for AstroImageJ, EXOTIC and HOPS." if copied else
+                                         "⚠ The clipboard could not be used: Save as .txt… instead."))
+
+    def roll_back(self):
+        if not self.doc or self.doc[1].get("format") not in (sp.CAMERA_FORMAT, sp.SYSTEM_FORMAT):
+            set_msg(self.msg_var, self.msg, "⚠ Pick a camera or system profile first.")
+            return
+        import rollback
+        path = self.doc[0]
+        if not rollback.revisions(path):
+            set_msg(self.msg_var, self.msg, "⚠ This profile has no earlier revision yet.")
+            return
+        self.roll_dialog = RollbackDialog(self.app, path, self._rolled)
+
+    def _rolled(self, doc):
+        self.show()
+        set_msg(self.msg_var, self.msg, f"✔ Revision {doc['rolled_back']['to_revision']} put back as revision "
+                                        f"{doc['revision']}; the one it replaced is kept in the history folder.")
+        self.app.set_status(f"✔ {doc.get('profile_id')} rolled back to revision {doc['rolled_back']['to_revision']}.")
+
+    def spec_curves(self):
+        import spec_editor
+        inst = None
+        if self.doc and self.doc[1].get("format") == sp.CAMERA_FORMAT:
+            inst = (self.doc[1].get("camera") or {}).get("instrume")
+        self.spec_dialog = spec_editor.SpecDialog(self.app, select_instrume=inst)
+        self.spec_dialog.bind("<Destroy>", lambda e: self.refresh() if e.widget is self.spec_dialog else None,
+                              add="+")
+
+    def set_value(self):
+        if not self.doc:
+            set_msg(self.msg_var, self.msg, "⚠ Pick a profile first.")
+            return
+        sel = self.tree.selection()
+        if not sel or sel[0] not in self.rec_paths:
+            set_msg(self.msg_var, self.msg, "⚠ Pick a value in the list first (a row with a unit).")
+            return
+        path, doc = self.doc
+        if doc.get("format") not in (sp.CAMERA_FORMAT, sp.SYSTEM_FORMAT):
+            return
+        rpath = self.rec_paths[sel[0]]
+        rec = doc
+        for p in rpath:
+            rec = rec[p]
+        import rollback
+        ans = simpledialog.askstring(
+            settings.APP_NAME, f"Your value for {rollback.value_name(rpath)} ({rec.get('unit')}).\n"
+            "It is saved with the source “user” and wins over header, spec and estimates until a run measures it.",
+            initialvalue="" if rec.get("value") is None else str(rec.get("value")), parent=self.app)
+        if ans is None:
+            return
+        try:
+            val = float(ans.replace(",", ""))
+            if not math.isfinite(val):
+                raise ValueError
+        except ValueError:
+            set_msg(self.msg_var, self.msg, f"✖ “{ans}” is not a number.")
+            return
+        rec.update(sp.record(val, rec.get("unit") or "", "user", date=sp.now_iso()[:10],
+                             note="typed on the Profiles page"))
+        try:
+            sp.save_profile(doc, settings.WRITTEN_BY)
+        except (sp.ProfileError, OSError) as exc:
+            set_msg(self.msg_var, self.msg, f"✖ Not saved ({exc}).")
+            return
+        settings.log(f"user value {'.'.join(str(p) for p in rpath)} = {val:g} in {path}")
+        self.show()
+        done = sp.load(path) if os.path.exists(path) else doc
+        redone = [rollback.value_name(("values", k)) for k in ("full_well_e", "linear_limit_adu")
+                  if (doc.get("values") or {}).get(k) != (done.get("values") or {}).get(k)]
+        set_msg(self.msg_var, self.msg, f"✔ Saved {rollback.number_words(val)} {rec.get('unit') or ''}; the previous "
+                                        "revision is in the history folder." +
+                (f" Worked out again from it: {', '.join(redone).lower()}." if redone else ""))
+
+
+def copy_text(root, text: str) -> bool:
+    """Put text on the clipboard (kept after FLUX closes on Windows). False when the clipboard cannot be used."""
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update_idletasks()
+        return True
+    except tk.TclError:
+        return False
+
+
+class ExportDialog(tk.Toplevel):
+    """What Copy for AstroImageJ / EXOTIC / HOPS put on the clipboard: Copy again, Save as .txt…, Close."""
+
+    def __init__(self, app, doc: dict, text: str, copied: bool):
+        super().__init__(app)
+        self.app, self.doc, self.text_out = app, doc, text
+        self.title(f"{settings.APP_NAME}: values for AstroImageJ, EXOTIC and HOPS")
+        self.configure(bg=style.CARD)
+        self.transient(app)
+        body = ttk.Frame(self, style="Card.TFrame", padding=(px(app, 16), px(app, 12)))
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="Values for AstroImageJ, EXOTIC and HOPS", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(body, style="Hint.TLabel", justify=tk.LEFT, wraplength=px(app, 760),
+                  text="Each program's fields in its own words and order, for this profile. Type or paste each "
+                       "value into the field of the same name. A value the profile does not have says “not measured "
+                       "yet”.").pack(anchor="w", fill=tk.X, pady=(0, px(app, 8)))
+        tf = ttk.Frame(body, style="Card.TFrame")
+        tf.pack(fill=tk.BOTH, expand=True)
+        self.text = tk.Text(tf, wrap="none", font=(style.MONO_FONT, 9), height=30, width=118, background="#ffffff",
+                            foreground=style.TEXT, relief="flat", padx=px(app, 6), pady=px(app, 6))
+        vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.text.yview)
+        hb = ttk.Scrollbar(tf, orient=tk.HORIZONTAL, command=self.text.xview)
+        self.text.configure(yscrollcommand=vb.set, xscrollcommand=hb.set)
+        hb.pack(side=tk.BOTTOM, fill=tk.X)
+        vb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text.insert("1.0", text)
+        self.text.configure(state="disabled")
+        self.msg_var = tk.StringVar()
+        self.msg = ttk.Label(body, textvariable=self.msg_var, style="Card.TLabel")
+        self.msg.pack(anchor="w", fill=tk.X, pady=(px(app, 6), 0))
+        set_msg(self.msg_var, self.msg, "✔ Copied to the clipboard." if copied else
+                "⚠ The clipboard could not be used: Save as .txt… instead.")
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.pack(fill=tk.X, pady=(px(app, 8), 0))
+        style.green_button(btns, "Copy to the clipboard", self.copy).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Save as .txt…", command=self.save_as).pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+    def copy(self):
+        ok = copy_text(self.app, self.text_out)
+        set_msg(self.msg_var, self.msg, "✔ Copied to the clipboard." if ok else
+                "⚠ The clipboard could not be used: Save as .txt… instead.")
+
+    def save_as(self, path: str | None = None) -> bool:
+        import tool_export
+        if path is None:
+            path = filedialog.asksaveasfilename(parent=self, title="Save the values as text",
+                                                initialdir=tool_export.downloads_dir(),
+                                                initialfile=tool_export.default_name(self.doc),
+                                                defaultextension=".txt", filetypes=[("Text", "*.txt")])
+            if not path:
+                return False
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(self.text_out)
+        except OSError as exc:
+            set_msg(self.msg_var, self.msg, f"✖ Not saved ({exc}).")
+            return False
+        settings.log(f"values for AstroImageJ / EXOTIC / HOPS saved to {path}")
+        set_msg(self.msg_var, self.msg, f"✔ Saved to {path}.")
+        return True
+
+
+class RollbackDialog(tk.Toplevel):
+    """The earlier revisions of one profile, newest first; pick one to see what it held against the profile now,
+    and put it back."""
+
+    def __init__(self, app, path: str, on_done):
+        import rollback
+        super().__init__(app)
+        self.app, self.path, self.on_done = app, path, on_done
+        self.title(f"{settings.APP_NAME}: Roll back {os.path.basename(path)[:-5]}")
+        self.configure(bg=style.CARD)
+        self.transient(app)
+        body = ttk.Frame(self, style="Card.TFrame", padding=(px(app, 16), px(app, 12)))
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="Roll back", style="Title.TLabel").pack(anchor="w")
+        hint = ttk.Label(body, style="Hint.TLabel", justify=tk.LEFT, wraplength=px(app, 720),
+                         text="Every save kept the revision before it. Pick one to see how it differs from the "
+                              "profile now; Put it back saves it as the newest revision (the one in use now is kept "
+                              "too, so you can roll forward again). SHOBS-P and SHOBS-SCHED read the newest.")
+        hint.pack(anchor="w", fill=tk.X, pady=(0, px(app, 8)))
+        cols = ("rev", "replaced", "by", "changes")
+        self.tree = ttk.Treeview(body, columns=cols, show="headings", height=7, selectmode="browse")
+        for c, w, words in zip(cols, (70, 150, 300, 200), ("Revision", "Replaced on", "Written by",
+                                                              "Differs from now")):
+            self.tree.heading(c, text=words)
+            self.tree.column(c, width=px(app, w), stretch=(c == "by"))
+        self.now_var = tk.StringVar()
+        ttk.Label(body, textvariable=self.now_var, style="Section.TLabel").pack(anchor="w", pady=(0, px(app, 4)))
+        self.tree.pack(fill=tk.X)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.show())
+        ttk.Label(body, text="Values in that revision → in the revision in use now", style="Section.TLabel").pack(
+            anchor="w", pady=(px(app, 8), 0))
+        tf = ttk.Frame(body, style="Card.TFrame")
+        tf.pack(fill=tk.BOTH, expand=True)
+        self.text = tk.Text(tf, wrap="word", font=style.font(10), height=10, background="#ffffff",
+                            foreground=style.TEXT, relief="flat", padx=px(app, 6), pady=px(app, 6))
+        vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.text.yview)
+        self.text.configure(yscrollcommand=vb.set)
+        vb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.msg_var = tk.StringVar()
+        self.msg = ttk.Label(body, textvariable=self.msg_var, style="Card.TLabel")
+        self.msg.pack(anchor="w", fill=tk.X, pady=(px(app, 6), 0))
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.pack(fill=tk.X, pady=(px(app, 8), 0))
+        self.put_btn = style.green_button(btns, "Put it back", self.put_back)
+        self.put_btn.pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self.revs = rollback.revisions(path)
+        try:
+            now_doc = sp.load(path)
+        except sp.ProfileError:
+            now_doc = {}
+        self.now_revision = now_doc.get("revision")
+        rb = now_doc.get("rolled_back") if isinstance(now_doc.get("rolled_back"), dict) else {}
+        self.now_var.set(f"Now using revision {self.now_revision}" +
+                         (f" (revision {rb['to_revision']} put back)" if rb.get("as_revision") == self.now_revision
+                          and rb.get("to_revision") is not None else "") +
+                         (f", updated {str(now_doc.get('updated'))[:10]}" if now_doc.get("updated") else "") + "."
+                         if self.now_revision is not None else "")
+        self.rows: dict[str, dict] = {}
+        try:
+            self.grab_set()                       # one roll-back at a time
+        except tk.TclError:
+            pass
+        for r in self.revs:
+            n = len(r["changes"])
+            iid = self.tree.insert("", "end", values=(
+                r["revision"] if r["revision"] is not None else "?", r["saved"], r.get("written_by") or "",
+                "cannot be read" if r.get("error") else ("same values as now" if n == 0 else
+                                                          f"{n} value{'s' if n != 1 else ''}")))
+            self.rows[iid] = r
+        kids = self.tree.get_children()
+        if kids:
+            self.tree.selection_set(kids[0])
+        self.show()
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+    def chosen(self):
+        sel = self.tree.selection()
+        return self.rows.get(sel[0]) if sel else None
+
+    def show(self):
+        import rollback
+        r = self.chosen()
+        self.text.configure(state="normal")
+        self.text.delete("1.0", tk.END)
+        if r is None:
+            pass
+        elif r.get("error"):
+            self.text.insert("1.0", f"This revision cannot be read: {r['error']}.")
+        elif not r["changes"]:
+            self.text.insert("1.0", "Every value is the same as in the profile now (only dates or notes differ).")
+        else:
+            self.text.insert("1.0", "\n".join(f"{rollback.value_name(name)}:   {old}   →   {new}"
+                                               for name, old, new in r["changes"]))
+        self.text.configure(state="disabled")
+        ok = bool(r and r.get("doc") is not None)
+        self.put_btn.state(["!disabled"] if ok else ["disabled"])
+
+    def put_back(self):
+        import rollback
+        from tkinter import messagebox
+        r = self.chosen()
+        if not r or r.get("doc") is None:
+            return
+        if not self.app.testing and not messagebox.askyesno(
+                settings.APP_NAME, f"Put revision {r['revision']} back as the newest revision?\n\n"
+                f"{len(r['changes'])} value(s) change. The revision in use now is kept in the history folder.",
+                parent=self):
+            return
+        try:
+            doc = rollback.roll_back(self.path, r["path"], settings.WRITTEN_BY)
+        except (rollback.RollbackError, OSError) as exc:
+            set_msg(self.msg_var, self.msg, f"✖ {exc}")
+            return
+        settings.log(f"rolled {self.path} back to revision {r['revision']} (now revision {doc.get('revision')})")
+        self.destroy()
+        self.on_done(doc)
+
+
+# ---- Credits -------------------------------------------------------------------------------------------------------
+
+class NewVersionWindow:
+    """1.0.1 (GitHub #2): what the newer release brings (its notes' Highlights), with Open release page and Close.
+    It never downloads or installs anything: the release page has the zip and the manual. Same window as
+    SHOBS-SCHED 1.4.1's and SHOBS-P 2.3.3's."""
+
+    def __init__(self, app, note: dict):
+        self.app, self.note = app, note
+        self.win = tk.Toplevel(app)
+        self.win.title("New version")
+        self.win.configure(bg=style.CARD)
+        self.win.transient(app)
+        body = ttk.Frame(self.win, style="Card.TFrame", padding=px(app, 16))
+        body.pack(fill=tk.BOTH, expand=True)
+        when = note.get("published") or ""
+        try:
+            when = date.fromisoformat(when).strftime("%d %b %Y") if when else ""
+        except ValueError:
+            pass
+        ttk.Label(body, text=f"{note.get('app') or settings.APP_NAME} {note.get('version') or note.get('tag')} is "
+                             f"available" + (f" (released {when})" if when else ""), style="Section.TLabel").grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(body, text=f"You have {settings.APP_VERSION}. What's new:", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(px(app, 4), px(app, 2)))
+        r = 2
+        self.lines = []
+        for h in note.get("highlights") or []:
+            ttk.Label(body, text=f"\u2022  {h}", style="Card.TLabel", justify=tk.LEFT, wraplength=px(app, 440)).grid(
+                row=r, column=0, sticky="w", padx=(px(app, 6), 0), pady=px(app, 1))
+            self.lines.append(h)
+            r += 1
+        ttk.Label(body, text="The release page has the full notes, the zip and the user's manual. Install it the way "
+                             "you installed this one; your profiles and run history are kept.", style="Hint.TLabel",
+                  justify=tk.LEFT, wraplength=px(app, 440)).grid(row=r, column=0, sticky="w", pady=(px(app, 8), 0))
+        r += 1
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.grid(row=r, column=0, sticky="w", pady=(px(app, 10), 0))
+        self.open_btn = style.green_button(btns, "Open release page", self.open_page)
+        self.open_btn.pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=self.close).pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        try:
+            self.win.bind("<Escape>", lambda _e: self.close())
+        except tk.TclError:
+            pass
+        self._place()
+
+    def _place(self):
+        """Over the middle of the main window, kept on the screen."""
+        try:
+            self.win.update_idletasks()
+            w, h = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
+            x = self.app.winfo_rootx() + max(0, (self.app.winfo_width() - w) // 2)
+            y = self.app.winfo_rooty() + max(0, (self.app.winfo_height() - h) // 3)
+            sw, sh = self.app.winfo_screenwidth(), self.app.winfo_screenheight()
+            if 0 <= self.app.winfo_rootx() < sw and 0 <= self.app.winfo_rooty() < sh:   # primary screen only
+                x, y = min(max(0, x), max(0, sw - w)), min(max(0, y), max(0, sh - h - 40))
+            self.win.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def open_page(self):
+        self.app.open_release(self.note.get("url"))
+        self.close()
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
+class CreditsPage:
+    title = "Credits and sources"
+    subtitle = "The methods, designs and libraries this app uses, with the citation each asks for."
+
+    def __init__(self, app: "App", parent):
+        self.app = app
+        self.frame = ttk.Frame(parent, style="Card.TFrame")
+        nav = ttk.Frame(self.frame, style="Card.TFrame")
+        nav.pack(side=tk.BOTTOM, fill=tk.X, pady=(px(app, 8), 0))
+        ttk.Button(nav, text="Save credits as text…", command=self.save_text).pack(side=tk.LEFT)
+        ttk.Button(nav, text="Back", command=self.back).pack(side=tk.RIGHT)
+        self.msg_var = tk.StringVar()
+        self.msg = ttk.Label(nav, textvariable=self.msg_var, style="Card.TLabel")
+        self.msg.pack(side=tk.LEFT, padx=px(app, 10))
+        head = ttk.Frame(self.frame, style="Card.TFrame")
+        head.pack(fill=tk.X, pady=(0, px(app, 8)))
+        ttk.Label(head, text=f"SHOBS-FLUX {settings.APP_VERSION}   {cr.COPYRIGHT}", style="Bold.TLabel").pack(anchor="w")
+        self.check_var = tk.BooleanVar(value=bool(app.prefs.get("check_updates", True)))
+        ttk.Checkbutton(head, text="Check for new versions at start (asks GitHub once a day; never downloads "
+                                   "anything)", variable=self.check_var, style="Card.TCheckbutton",
+                        command=self.set_check).pack(anchor="w", pady=(px(app, 2), px(app, 2)))
+        lic = ttk.Label(head, text=cr.LICENSE_LINE, style="Card.TLabel", justify=tk.LEFT)
+        lic.pack(anchor="w", fill=tk.X)
+        follow_wrap(lic, head, px(app, 10))
+        cite = cr.citation_text(settings.APP_VERSION)
+        if cite:
+            ttk.Label(head, text="How to cite SHOBS-FLUX", style="Section.TLabel").pack(anchor="w")
+            cl = ttk.Label(head, text=cite, style="Card.TLabel", justify=tk.LEFT)
+            cl.pack(anchor="w", fill=tk.X)
+            follow_wrap(cl, head, px(app, 10))
+        tf = ttk.Frame(self.frame, style="Card.TFrame")
+        tf.pack(fill=tk.BOTH, expand=True)
+        self.text = tk.Text(tf, wrap="word", font=style.font(10), background="#ffffff", foreground=style.TEXT,
+                            relief="flat", padx=px(app, 8), pady=px(app, 8), height=10)
+        vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.text.yview)
+        self.text.configure(yscrollcommand=vb.set)
+        vb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text.insert("1.0", cr.credits_text())
+        self.text.configure(state="disabled")
+
+    def refresh(self):
+        pass
+
+    def set_check(self):
+        self.app.prefs["check_updates"] = bool(self.check_var.get())
+        settings.save(self.app.prefs)
+        if not self.check_var.get():
+            self.app.clear_update()
+
+    def back(self):
+        self.app.show_page(self.app.page_index if self.app.page_index is not None else 0)
+
+    def save_text(self):
+        path = filedialog.asksaveasfilename(parent=self.app, defaultextension=".txt",
+                                            initialfile="SHOBS-FLUX credits.txt",
+                                            filetypes=[("Text", "*.txt")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(f"SHOBS-FLUX {settings.APP_VERSION}\n{cr.COPYRIGHT}\n{cr.LICENSE_LINE}\n\n"
+                         + cr.credits_text())
+        except OSError as exc:
+            set_msg(self.msg_var, self.msg, f"✖ Not saved ({exc.strerror or exc}).")
+            return
+        set_msg(self.msg_var, self.msg, f"✔ Saved {os.path.basename(path)}.")
+
+
+# ---- the app -------------------------------------------------------------------------------------------------------
+
+class App(tk.Tk):
+    def __init__(self, testing: bool = False):
+        style.enable_windows_dpi()
+        set_app_id()
+        super().__init__(className="SHOBS-FLUX")
+        self.testing = testing
+        self.title(settings.APP_TITLE)
+        self.configure(bg=style.FRAME_BG)
+        self._set_window_icon()
+        style.setup(self)
+        self.prefs = settings.load()
+        self.jobs = Jobs(self)
+        self._build()
+        self._place_window()
+        self.show_page(0)
+        bad = sp.self_check()
+        self.set_status(f"✖ The shared profile code failed its own check ({', '.join(bad)})." if bad else
+                        f"Data folder: {sp.data_dir()}")
+        settings.log(f"opened {settings.WRITTEN_BY}")
+        if not testing:
+            self.check_for_update()
+
+    def check_for_update(self):
+        """GitHub SHOBS-FLUX #2: ask, in the background, whether a newer release is out (once a day at most)."""
+        import shobs_update
+        shobs_update.start(self, settings.APP_NAME, settings.REPO, settings.APP_VERSION, self.prefs, settings.save,
+                           self.show_update)
+
+    UPDATE_STATUS_ROOM = 640       # px kept for the status message beside the note (as SHOBS-SCHED)
+
+    def show_update(self, note: dict):
+        if not self.prefs.get("check_updates", True):
+            return                                     # unticked while the check ran
+        self.update_note = dict(note or {})
+        self.update_url = self.update_note.get("url") or ""
+        self._fit_update_note()
+        settings.log(f"new version: {self.update_note.get('tag')} ({self.update_url})")
+
+    def _fit_update_note(self, _e=None):
+        """The note with its highlight when the strip has room for it beside the status message, else the short
+        form ("… is available — click for details"); the New version window always lists the highlights."""
+        note = self.update_note
+        if not note:
+            return
+        full = note.get("text") or ""
+        short = (f"{note.get('app') or settings.APP_NAME} {note.get('version') or note.get('tag')} is available — "
+                 + ("click for details" if note.get("highlights") else "see the release notes"))
+        try:
+            room = int(self.winfo_width()) - px(self, self.UPDATE_STATUS_ROOM)
+            f = getattr(self, "_update_font", None)
+            if f is None:
+                f = self._update_font = tkfont.Font(self, font=style.font(10, "underline"))
+            text = full if f.measure(full) <= room else short
+        except Exception:
+            text = short
+        if self.update_var.get() != text:
+            self.update_var.set(text)
+        if not getattr(self, "_update_fit_bound", False):
+            self._update_fit_bound = True
+            self.bind("<Configure>", lambda e: self._fit_update_note() if e.widget is self else None, add="+")
+
+    def open_update(self):
+        """A click on the note: the New version window when the release has highlights, else the release page."""
+        note = self.update_note
+        if not note:
+            return
+        if note.get("highlights"):
+            w = getattr(self, "_new_version_win", None)
+            try:
+                if w is not None and w.win.winfo_exists():
+                    w.win.lift()
+                    return
+            except tk.TclError:
+                pass
+            self._new_version_win = NewVersionWindow(self, note)
+        else:
+            self.open_release()
+
+    def clear_update(self):
+        """The check was switched off: the note, its link and an open New version window all go."""
+        self.update_var.set("")
+        self.update_note = {}
+        self.update_url = ""
+        w = getattr(self, "_new_version_win", None)
+        if w is not None:
+            w.close()
+            self._new_version_win = None
+
+    def open_release(self, url: str | None = None):
+        url = url or self.update_url
+        if url and str(url).startswith("https://github.com/"):     # as fetch_latest only keeps github.com pages
+            import webbrowser
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+    def _set_window_icon(self):
+        ico = os.path.join(APP_DIR, "shobs_flux.ico")
+        png = os.path.join(APP_DIR, "shobs_flux.png")
+        try:
+            if sys.platform == "win32" and os.path.exists(ico):
+                self.iconbitmap(default=ico)
+            elif os.path.exists(png):
+                self._icon_image = tk.PhotoImage(master=self, file=png)
+                self.iconphoto(True, self._icon_image)
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb):
+        text = "".join(traceback.format_exception(exc, val, tb))
+        settings.log("Error in the window; traceback follows.\n" + text)
+        try:
+            self.set_status(f"✖ Something went wrong: {val}. Details are in {settings.log_path()}.")
+        except Exception:
+            pass
+        if self.testing:
+            raise val
+
+    def destroy(self):
+        try:
+            for aid in self.tk.splitlist(self.tk.call("after", "info")):
+                try:
+                    self.tk.call("after", "cancel", aid)
+                except tk.TclError:
+                    pass
+        except tk.TclError:
+            pass
+        super().destroy()
+
+    def set_status(self, text: str):
+        self.status_var.set(text or "")
+        kind = style.kind_of(text or "")
+        self.status_label.configure(style={"bad": "StatusBad.TLabel", "warn": "StatusWarn.TLabel"}.get(
+            kind, "Status.TLabel"))
+
+    def _build(self):
+        self.status_var = tk.StringVar(value="")
+        status = ttk.Frame(self, style="Status.TFrame")
+        status.pack(side=tk.BOTTOM, fill=tk.X)
+        row = ttk.Frame(status, style="Status.TFrame")
+        row.pack(fill=tk.X, padx=px(self, 12), pady=(px(self, 4), 0))
+        self.busy_bar = style.BusyBar(row, label_style="Status.TLabel", frame_style="Status.TFrame",
+                                      bar_style="Status.Horizontal.TProgressbar")
+        self.busy_bar.pack(side=tk.LEFT)
+        # a newer release (shobs_update.py): its own note at the right, so other messages never wipe it
+        self.update_var = tk.StringVar(value="")
+        self.update_url = ""
+        self.update_note: dict = {}
+        self.update_label = ttk.Label(row, textvariable=self.update_var, style="StatusLink.TLabel", cursor="hand2")
+        self.update_label.pack(side=tk.RIGHT, anchor="e", padx=(px(self, 10), 0))
+        self.update_label.bind("<Button-1>", lambda _e: self.open_update())
+        self.status_label = ttk.Label(row, textvariable=self.status_var, style="Status.TLabel", anchor="w")
+        self.status_label.pack(side=tk.LEFT, anchor="w", fill=tk.X, expand=True)
+        line = ttk.Label(status, text=cr.STATUS_LINE, style="Status.TLabel", foreground=style.SIDE_HINT)
+        line.pack(anchor="w", fill=tk.X, padx=px(self, 12), pady=(0, px(self, 4)))
+
+        outer = ttk.Frame(self)
+        outer.pack(fill=tk.BOTH, expand=True)
+        side = ttk.Frame(outer, style="Side.TFrame")
+        side.pack(side=tk.LEFT, fill=tk.Y)
+        ttk.Label(side, text="Shiloh Hill\nObservatory\nOptical System\nCharacterization", style="SideTitle.TLabel",
+                  justify=tk.LEFT).pack(anchor="w", padx=px(self, 16), pady=(px(self, 18), px(self, 2)))
+        ttk.Label(side, text="(SHOBS-FLUX)", style="SideHint.TLabel").pack(anchor="w", padx=px(self, 16))
+        ttk.Label(side, text="Measures your camera\nand telescope, and\nkeeps their numbers\nfor SHOBS-P and\nSHOBS-SCHED",
+                  style="SideHint.TLabel", justify=tk.LEFT).pack(anchor="w", padx=px(self, 16),
+                                                                 pady=(px(self, 8), px(self, 12)))
+        ttk.Label(side, text="PAGES", style="SideHead.TLabel").pack(anchor="w", padx=px(self, 16))
+        self.step_buttons = []
+        for i, name in enumerate(PAGES):
+            b = ttk.Button(side, text=f"{i + 1}   {name}", style="Step.TButton", command=lambda n=i: self.show_page(n))
+            b.pack(fill=tk.X, padx=px(self, 10), pady=px(self, 2))
+            self.step_buttons.append(b)
+        ttk.Label(side, text=f"Version {settings.APP_VERSION}", style="SideHint.TLabel").pack(
+            side=tk.BOTTOM, anchor="w", padx=px(self, 16), pady=px(self, 10))
+        self.credits_button = ttk.Button(side, text="Credits and sources", style="Step.TButton",
+                                         command=self.show_credits)
+        self.credits_button.pack(side=tk.BOTTOM, fill=tk.X, padx=px(self, 10), pady=(0, px(self, 4)))
+
+        right = ttk.Frame(outer)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        card = ttk.Frame(right, style="Card.TFrame", padding=(px(self, 16), px(self, 12)))
+        card.pack(fill=tk.BOTH, expand=True, padx=px(self, 12), pady=px(self, 12))
+        self.title_var = tk.StringVar()
+        self.subtitle_var = tk.StringVar()
+        ttk.Label(card, textvariable=self.title_var, style="Title.TLabel").pack(anchor="w")
+        sub = ttk.Label(card, textvariable=self.subtitle_var, style="Hint.TLabel", justify=tk.LEFT)
+        sub.pack(anchor="w", fill=tk.X, pady=(0, px(self, 8)))
+        follow_wrap(sub, card, px(self, 40))
+        holder = ttk.Frame(card, style="Card.TFrame")
+        holder.pack(fill=tk.BOTH, expand=True)
+        self.check_page = CheckPage(self, holder)
+        self.profiles_page = ProfilesPage(self, holder)
+        self.pages = [self.check_page,
+                      self._camera_page(holder),
+                      self._sky_page(holder),
+                      self.profiles_page,
+                      self._history_page(holder)]
+        for p in self.pages:
+            p.frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.credits_page = CreditsPage(self, holder)
+        self.credits_page.frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.page_index = None
+
+    def _camera_page(self, holder):
+        import camera_page
+        self.camera_page = camera_page.CameraPage(self, holder)
+        return self.camera_page
+
+    def _history_page(self, holder):
+        import history_page
+        self.history_page = history_page.HistoryPage(self, holder)
+        return self.history_page
+
+    def _sky_page(self, holder):
+        import sky_page
+        self.sky_page = sky_page.SkyPage(self, holder)
+        return self.sky_page
+
+    def _place_window(self):
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            w, h = int(sw * 0.8), int(sh * 0.82)
+            self.geometry(f"{w}x{h}+{(sw - w) // 2}+{max(0, (sh - h) // 3)}")
+            self.minsize(min(w, px(self, 900)), min(h, px(self, 560)))
+        except tk.TclError:
+            pass
+
+    def show_page(self, i: int):
+        self.page_index = i
+        page = self.pages[i]
+        page.frame.tkraise()
+        self.title_var.set(PAGES[i])
+        self.subtitle_var.set(SUBTITLES[PAGES[i]])
+        for k, b in enumerate(self.step_buttons):
+            b.configure(style="StepOn.TButton" if k == i else "Step.TButton")
+        self.credits_button.configure(style="Step.TButton")
+        page.refresh()
+
+    def show_credits(self):
+        self.credits_page.frame.tkraise()
+        self.title_var.set(CreditsPage.title)
+        self.subtitle_var.set(CreditsPage.subtitle)
+        for b in self.step_buttons:
+            b.configure(style="Step.TButton")
+        self.credits_button.configure(style="StepOn.TButton")
+
+
+def main():
+    try:
+        app = App()
+    except Exception:
+        settings.log("could not start; traceback follows.\n" + traceback.format_exc())
+        raise
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):     # a frame dropped on the shortcut / given on the line
+        app.after(300, lambda: app.check_page.check(sys.argv[1]))
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

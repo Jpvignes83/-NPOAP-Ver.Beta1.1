@@ -1,0 +1,3 @@
+﻿NPOAP Ver.Beta 1.1
+Successor of -NPOAP-Ver.Beta1.0
+Includes SHOBS-FLUX instrument characterization integration.

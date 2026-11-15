@@ -1,0 +1,24 @@
+# Local / secrets
+config.json
+.astrometry_api_key
+.env
+.venv/
+venv/
+
+# Données utilisateur et sorties
+output/
+*.fits
+*.fit
+*.log
+logs/*.log
+!logs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db

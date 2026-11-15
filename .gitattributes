@@ -1,0 +1,7 @@
+# Scripts shell WSL/Linux : LF obligatoires (CRLF casse "set -o pipefail" sous bash).
+Installation_fsps/*.sh text eol=lf
+scripts/*.sh text eol=lf
+
+# Scripts Windows cmd : CRLF obligatoires (LF fait manger la 1ere lettre : 'itle', 'et', 'M'...).
+*.bat text eol=crlf
+*.cmd text eol=crlf
