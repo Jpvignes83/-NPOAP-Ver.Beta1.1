@@ -1,1 +1,15 @@
-"""Core package for the photometric analysis tool.\n\nThis package exposes the main classes and functions used throughout the\napplication. Only modules that currently exist are imported.\n"""\n\nfrom .image_processor import ImageProcessor\nfrom .calculate_master import CalculateMaster\nfrom .jd_bjd_calculator import JD_BJD_Calculator\n\n__all__ = [\n    "ImageProcessor",\n    "CalculateMaster",\n    "JD_BJD_Calculator",\n]
+"""Core package for the photometric analysis tool.
+
+This package exposes the main classes and functions used throughout the
+application. Only modules that currently exist are imported.
+"""
+
+from .image_processor import ImageProcessor
+from .calculate_master import CalculateMaster
+from .jd_bjd_calculator import JD_BJD_Calculator
+
+__all__ = [
+    "ImageProcessor",
+    "CalculateMaster",
+    "JD_BJD_Calculator",
+]
