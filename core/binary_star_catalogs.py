@@ -206,7 +206,7 @@ class BinaryStarCatalog:
                     if 'VarType' in vsx.colnames:
                         params['variability_type'] = str(vsx['VarType'][0])
                     return params
-        except:
+        except Exception:
             pass
         return None
     
@@ -374,7 +374,7 @@ class BinaryStarCatalog:
                             if params:
                                 logger.info("DEBCat: Paramètres détaillés trouvés")
                                 return params
-                except:
+                except Exception:
                     continue
         except Exception as e:
             logger.debug(f"DEBCat query error: {e}")

@@ -325,7 +325,7 @@ class AstrometrySolverNova:
             try:
                 os.remove(d)
                 self._log(f"Supprimé : {d.name}")
-            except:
+            except Exception:
                 pass
 
         # FIN

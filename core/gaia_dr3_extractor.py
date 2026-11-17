@@ -195,7 +195,7 @@ class GaiaDR3Extractor:
                         with open(output_path, 'r', encoding='utf-8') as f:
                             n_stars = sum(1 for line in f) - 1
                     total_stars += n_stars
-                except:
+                except Exception:
                     pass
                 continue
             

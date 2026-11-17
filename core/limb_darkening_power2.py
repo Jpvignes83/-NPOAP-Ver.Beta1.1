@@ -295,7 +295,7 @@ def fit_power2_coefficients(time, flux, flux_err, period, t0, rp_rs, a_rs, incli
             # Calculer le chi2
             chi2 = np.sum(((flux - model) / flux_err)**2)
             return chi2
-        except:
+        except Exception:
             return 1e10
     
     # Ajustement
