@@ -1866,7 +1866,7 @@ class EasyLuckyImagingTab(ttk.Frame):
             try:
                 interval = ZScaleInterval()
                 vmin_init, vmax_init = interval.get_limits(data)
-            except:
+            except Exception:
                 vmin_init, vmax_init = np.percentile(data, [10, 90])
             
             # Échelle centrée sur médiane avec 5000 unités
@@ -2158,7 +2158,7 @@ class EasyLuckyImagingTab(ttk.Frame):
                         if elem is not None:
                             try:
                                 elem.remove()
-                            except:
+                            except Exception:
                                 pass
                     
                     # Longueur des flèches pour le compas (allongées nettement)
@@ -2282,6 +2282,7 @@ class EasyLuckyImagingTab(ttk.Frame):
                         mid_idx = len(arc_angles_rad) // 2
                         mid_theta_rad = arc_angles_rad[mid_idx]
                     else:
+                        start_angle_rad = north_angle_rad  # (branche de repli : variable auparavant non définie)
                         mid_theta_rad = start_angle_rad + np.radians(theta / 2.0) if theta <= 180.0 else start_angle_rad - np.radians((360.0 - theta) / 2.0)
                         mid_theta_rad = mid_theta_rad % (2 * np.pi)
                     text_x = x1 + arc_radius * 1.3 * np.cos(mid_theta_rad)
@@ -2340,7 +2341,7 @@ class EasyLuckyImagingTab(ttk.Frame):
                     if elem is not None:
                         try:
                             elem.remove()
-                        except:
+                        except Exception:
                             pass
                         if elem == theta_arrow_north:
                             theta_arrow_north = None
@@ -2514,7 +2515,7 @@ class EasyLuckyImagingTab(ttk.Frame):
                         epoch_year = float(date_obs.split('-')[0])
                     else:
                         epoch_year = datetime.now().year
-                except:
+                except Exception:
                     epoch_year = datetime.now().year
                 
                 # Récupérer le filtre si disponible
@@ -2534,12 +2535,12 @@ class EasyLuckyImagingTab(ttk.Frame):
                         center_coord = wcs.pixel_to_world_values(*center_pix)
                         ra_center = center_coord[0]
                         dec_center = center_coord[1]
-                except:
+                except Exception:
                     # Essayer d'extraire depuis l'en-tête directement
                     ra_center = header.get('CRVAL1', header.get('RA', None))
                     dec_center = header.get('CRVAL2', header.get('DEC', None))
                     
-        except:
+        except Exception:
             date_obs = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             epoch_year = datetime.now().year
             filter_name = "Unknown"

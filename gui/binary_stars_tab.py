@@ -154,7 +154,7 @@ class BinaryStarsTab(ttk.Frame):
                     text=f"✓ PHOEBE2 {version} installé",
                     foreground="green"
                 )
-            except:
+            except Exception:
                 self.phoebe_status_label.config(
                     text="✓ PHOEBE2 installé",
                     foreground="green"
@@ -704,7 +704,7 @@ class BinaryStarsTab(ttk.Frame):
                 try:
                     times = self.b['value@times@{}@model'.format(dataset_label)]
                     fluxes = self.b['value@fluxes@{}@model'.format(dataset_label)]
-                except:
+                except Exception:
                     # Fallback sur lc01 si le format est différent
                     times = self.b['value@times@lc01@model']
                     fluxes = self.b['value@fluxes@lc01@model']

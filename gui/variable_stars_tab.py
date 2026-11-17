@@ -871,7 +871,7 @@ class VariableStarsTab(ttk.Frame):
             self.after(0, done)
         except Exception as e:
             logger.exception("Batch photométrie variables")
-            self.after(0, lambda: messagebox.showerror("Erreur", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Erreur", str(e)))
 
     # ------------------------------------------------------------------
     # Courbe de lumière & export

@@ -481,7 +481,7 @@ class TransientTNSTab(ttk.Frame):
             ))
         except Exception as e:
             logger.error(f"Erreur recherche TNS: {e}", exc_info=True)
-            self.after(0, lambda: messagebox.showerror("Erreur", f"Erreur recherche TNS:\n{e}"))
+            self.after(0, lambda e=e: messagebox.showerror("Erreur", f"Erreur recherche TNS:\n{e}"))
     
     def display_results(self):
         """Affiche les résultats de recherche dans le Treeview."""
@@ -556,7 +556,7 @@ class TransientTNSTab(ttk.Frame):
                 self.after(0, lambda: messagebox.showinfo("Info", f"Aucun détail trouvé pour {objname}"))
         except Exception as e:
             logger.error(f"Erreur récupération détails TNS: {e}", exc_info=True)
-            self.after(0, lambda: messagebox.showerror("Erreur", f"Erreur récupération détails:\n{e}"))
+            self.after(0, lambda e=e: messagebox.showerror("Erreur", f"Erreur récupération détails:\n{e}"))
     
     def display_details(self, objname, details):
         """Affiche les détails d'un objet dans la zone de texte."""
