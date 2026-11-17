@@ -2617,7 +2617,7 @@ class AsteroidPhotometryTab:
                 win.after(0, lambda: status_var.set("ERREUR: Délai dépassé."))
             except Exception as e:
                 logger.error("KBMOD WSL: %s", e, exc_info=True)
-                win.after(0, lambda: status_var.set("ERREUR: " + str(e)[:200]))
+                win.after(0, lambda e=e: status_var.set("ERREUR: " + str(e)[:200]))
 
         def run_in_thread():
             progress_var.set(0.0)
@@ -4385,7 +4385,7 @@ class AsteroidPhotometryTab:
                 try:
                     from core.photometry_pipeline_asteroids import airmass
                     airmass = airmass(target_ra, target_dec, t_mid)
-                except:
+                except Exception:
                     airmass = 1.0
             if airmass is None:
                 airmass = 1.0
@@ -5105,7 +5105,7 @@ class AsteroidPhotometryTab:
 
             except Exception as e:
                 logger.error(f"Erreur photométrie batch: {e}", exc_info=True)
-                self.frame.after(0, lambda: messagebox.showerror("Erreur", f"Erreur lors de la photométrie batch:\n{e}"))
+                self.frame.after(0, lambda e=e: messagebox.showerror("Erreur", f"Erreur lors de la photométrie batch:\n{e}"))
             finally:
                 self.frame.after(0, lambda: self._stop_process_log_capture("photométrie batch"))
         

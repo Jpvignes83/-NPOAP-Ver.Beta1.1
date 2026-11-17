@@ -1525,7 +1525,7 @@ class NightObservationTab(ttk.Frame):
             logger.error("Erreur recherche Astro-COLIBRI (nuit) : %s", e, exc_info=True)
             self.after(
                 0,
-                lambda: messagebox.showerror(
+                lambda e=e: messagebox.showerror(
                     "Erreur", f"Erreur recherche Astro-COLIBRI pour la nuit :\n{e}"
                 ),
             )

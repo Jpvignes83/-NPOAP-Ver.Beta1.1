@@ -282,7 +282,7 @@ class NinaControlTab(ttk.Frame):
                 worker()
             except Exception as e:
                 logger.exception("NINA %s", label)
-                self.after(0, lambda: self._nina_on_error(label, str(e)))
+                self.after(0, lambda e=e: self._nina_on_error(label, str(e)))
             finally:
                 self._nina_set_busy(False)
 
@@ -565,7 +565,7 @@ class NinaControlTab(ttk.Frame):
                 self.after(0, lambda: self.nina_seq_progress_var.set("Interrompu"))
             except Exception as e:
                 logger.exception("Séquence NINA")
-                self.after(0, lambda: self._nina_on_error("Séquence", str(e)))
+                self.after(0, lambda e=e: self._nina_on_error("Séquence", str(e)))
             finally:
                 self._nina_set_busy(False)
 

@@ -270,7 +270,7 @@ class CataloguesTab(ttk.Frame):
                     # Parser les coordonnées
                     try:
                         center_coord = SkyCoord(ra_str, dec_str, unit=(u.hourangle, u.deg))
-                    except:
+                    except Exception:
                         # Essayer en degrés
                         center_coord = SkyCoord(ra=float(ra_str) * u.deg, dec=float(dec_str) * u.deg)
                     
@@ -1660,7 +1660,7 @@ class CataloguesTab(ttk.Frame):
             )
         except Exception as e:
             self._tess_lc_log(f"[LcTools] Erreur : {e}")
-            self.after(0, lambda: messagebox.showerror("Normalisation LcTools", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Normalisation LcTools", str(e)))
             return
         if proc.stdout:
             for line in proc.stdout.splitlines():
@@ -1703,7 +1703,7 @@ class CataloguesTab(ttk.Frame):
             )
         except Exception as e:
             self._tess_lc_log(f"[FITS édité] Erreur : {e}")
-            self.after(0, lambda: messagebox.showerror("FITS édité", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("FITS édité", str(e)))
             return
         if proc.stdout:
             for line in proc.stdout.splitlines():
