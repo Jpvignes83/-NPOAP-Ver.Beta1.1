@@ -22,3 +22,15 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Outils / IDE / builds
+.vscode/
+.idea/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Fichiers générés par les scripts d'installation / astrometry.net
+exclude_files.txt
+err.html

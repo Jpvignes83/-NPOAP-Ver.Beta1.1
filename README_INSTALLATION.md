@@ -59,9 +59,9 @@ Sinon, vous pouvez aussi lancer les scripts individuellement :
 | `install_ubuntu_wsl.bat` | Ajoute la distribution **Ubuntu** dans WSL (`wsl --install -d Ubuntu`). |
 | `install_astrometry_wsl.bat` | Installe **astrometry.net** dans la distro WSL par défaut (`apt-get`). |
 | `install_kbmod_wsl.bat` | Installe **KBMOD** sous WSL via `scripts/install_kbmod_wsl.sh` (voir aussi `docs/INSTALL_KBMOD_WSL.md`). |
-| `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat` | Installe **Prospector** (astro-prospector) dans l’environnement Conda **`astroenv`** sous Windows : appelle le script PowerShell ci-dessous. |
-| `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.ps1` | Même installation que le `.bat`, avec options (`-InstallFSPS`, `-CondaEnv`, etc.). Le `.bat` est un lanceur pratique ; le `.ps1` est le script réel. |
-| `Installation_fsps/prospector.bat` | Lance sous **WSL2** le script Linux `Installation_fsps/install_prospector_wsl.sh` : **venv dédié** dans WSL, **gfortran**, tentative d’installation complète incluant **fsps** (souvent plus simple que sous Windows natif). **Indépendant** de Conda Windows : NPOAP continue d’utiliser `astroenv` pour l’interface ; cette voie sert surtout à un environnement Prospector/FSPS sous Linux. |
+| `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat` | *(non présent dans ce dépôt : retiré, voir `docs/MANUEL_INSTALLATION.md`)* Installe **Prospector** (astro-prospector) dans l’environnement Conda **`astroenv`** sous Windows : appelle le script PowerShell ci-dessous. |
+| `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.ps1` | *(non présent dans ce dépôt)* Même installation que le `.bat`, avec options (`-InstallFSPS`, `-CondaEnv`, etc.). Le `.bat` est un lanceur pratique ; le `.ps1` est le script réel. |
+| `Installation_fsps/prospector.bat` | *(dossier `Installation_fsps/` non présent dans ce dépôt ; fourni seulement dans certaines livraisons ZIP)* Lance sous **WSL2** le script Linux `Installation_fsps/install_prospector_wsl.sh` : **venv dédié** dans WSL, **gfortran**, tentative d’installation complète incluant **fsps** (souvent plus simple que sous Windows natif). **Indépendant** de Conda Windows : NPOAP continue d’utiliser `astroenv` pour l’interface ; cette voie sert surtout à un environnement Prospector/FSPS sous Linux. |
 
 La liste courte est aussi dans **`LISTE_INSTALL_OPTIONNELS.txt`**.
 
@@ -72,6 +72,8 @@ Le module **sncosmo** (SALT2/SALT3) est désormais inclus dans l’installation 
 Les filtres **Gaia G, G_Bp, G_Rp** sont mappés vers les bandes sncosmo `gaia::g`, `gaia::gbp`, `gaia::grp`. Le premier lancement peut télécharger les surfaces de modèle SALT (accès réseau).
 
 ### Prospector / FSPS : faut-il encore le `.bat` et le `.ps1` Windows ?
+
+> **Note** : `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat/.ps1` et le dossier `Installation_fsps/` ne figurent plus dans ce dépôt (voir `docs/MANUEL_INSTALLATION.md`, « Installateurs supprimés »). Les indications ci-dessous ne s'appliquent que si vous disposez de ces fichiers.
 
 **Oui**, si vous voulez **Prospector dans le même Python que NPOAP** (`conda activate astroenv` → `python main.py`). C’est le cas le plus courant : exécutez **`INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat`** (ou le `.ps1` à la main). Sans **gfortran**, la compilation de **fsps** échoue souvent sous Windows : le script bascule alors sur **`pip install … --no-deps`** et des **fichiers stub** sous `SPS_HOME` ; Prospector reste utilisable pour une grande partie des fonctions.
 
@@ -163,6 +165,7 @@ Les fichiers sources de NPOAP sont automatiquement protégés en lecture seule l
 
 ### Scripts de protection
 
+- *(`protect_files.bat` et `unprotect_files.bat` ne figurent pas dans ce dépôt ; `installation.bat` ignore l'étape si le fichier est absent.)*
 - **`protect_files.bat`** : Remet les fichiers en lecture seule
 - **`unprotect_files.bat`** : Retire la protection (à utiliser avec précaution)
 
