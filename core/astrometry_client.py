@@ -44,6 +44,13 @@ class MalformedResponse(Exception):
 class RequestError(Exception):
     pass
 
+def _masque_secrets(args):
+    """Copie de args sans clé API ni session (évite de les écrire dans la console / les logs)."""
+    if not isinstance(args, dict):
+        return args
+    return {k: ('***' if k in ('apikey', 'session') else v) for k, v in args.items()}
+
+
 class Client(object):
     default_url = 'https://nova.astrometry.net/api/'
 
@@ -55,16 +62,18 @@ class Client(object):
     def get_url(self, service):
         return self.apiurl + service
 
-    def send_request(self, service, args={}, file_args=None):
+    def send_request(self, service, args=None, file_args=None):
         '''
         service: string
         args: dict
         '''
+        # (args={} en défaut était un dict partagé entre appels, muté par args.update)
+        if args is None:
+            args = {}
         if self.session is not None:
             args.update({ 'session' : self.session })
-        print('Python:', args)
+        print('Python:', _masque_secrets(args))
         json = python2json(args)
-        print('Sending json:', json)
         url = self.get_url(service)
         print('Sending to URL:', url)
 
@@ -94,21 +103,18 @@ class Client(object):
         else:
             # Else send x-www-form-encoded
             data = {'request-json': json}
-            print('Sending form data:', data)
             data = urlencode(data)
             data = data.encode('utf-8')
-            print('Sending data:', data)
             headers = {}
 
         request = Request(url=url, headers=headers, data=data)
 
         try:
-            f = urlopen(request)
+            f = urlopen(request, timeout=120)
             print('Got reply HTTP status code:', f.status)
             txt = f.read()
-            print('Got json:', txt)
             result = json2python(txt)
-            print('Got result:', result)
+            print('Got result:', _masque_secrets(result))
             stat = result.get('status')
             print('Got status:', stat)
             if stat == 'error':
@@ -125,7 +131,7 @@ class Client(object):
         args = { 'apikey' : apikey }
         result = self.send_request('login', args)
         sess = result.get('session')
-        print('Got session:', sess)
+        print('Got session: ok')
         if not sess:
             raise RequestError('no session in result')
         self.session = sess
@@ -241,7 +247,7 @@ class Client(object):
         et l’enregistre à l’emplacement spécifié.
         """
         url = f"https://nova.astrometry.net/wcs_file/{job_id}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=120)
         if response.status_code == 200:
             with open(dest_path, "wb") as f:
                 f.write(response.content)
@@ -390,7 +396,7 @@ def run_client(opt):
 
         for url,fn in retrieveurls:
             print('Retrieving file from', url, 'to', fn)
-            with urlopen(url) as r:
+            with urlopen(url, timeout=120) as r:
                 with open(fn, 'wb') as w:
                     shutil.copyfileobj(r, w)
             print('Wrote to', fn)

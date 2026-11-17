@@ -48,8 +48,8 @@ def to_lightcurve(
         flux=flux,
         flux_err=flux_err,
         time_format=time_format,
-        targetid=targetid,
-        mission=mission,
+        # lightkurve >= 2 n'accepte plus targetid/mission comme arguments : métadonnées via meta
+        meta={"TARGETID": targetid, "MISSION": mission},
     )
     return lc
 
@@ -111,7 +111,19 @@ def periodogram_lombscargle(
     """Lomb-Scargle periodogram via astropy.timeseries."""
     if not LIGHTKURVE_AVAILABLE:
         raise ImportError("lightkurve / astropy.timeseries required")
-    ls = LombScargle(lc.time, lc.flux, lc.flux_err, nterms=nterms)
+    # Valeurs nues (jours / flux) : avec des objets Time/Quantity astropy exige des unités
+    # sur minimum_frequency / maximum_frequency (UnitConversionError / TypeError).
+    flux_err = getattr(lc, "flux_err", None)
+    flux_err_val = None if flux_err is None else np.asarray(getattr(flux_err, "value", flux_err))
+    # lightkurve remplit flux_err de NaN quand aucune erreur n'est fournie : on l'ignore alors
+    if flux_err_val is not None and not np.all(np.isfinite(flux_err_val)):
+        flux_err_val = None
+    ls = LombScargle(
+        np.asarray(lc.time.value),
+        np.asarray(getattr(lc.flux, "value", lc.flux)),
+        flux_err_val,
+        nterms=nterms,
+    )
     freq, power = ls.autopower(
         minimum_frequency=1.0 / max_period,
         maximum_frequency=1.0 / min_period,
@@ -143,6 +155,12 @@ def bin_lightcurve(
     """Bin a LightCurve (time in days)."""
     if not LIGHTKURVE_AVAILABLE:
         raise ImportError("lightkurve required")
+    # lightkurve/astropy attend un callable, pas un nom de fonction
+    if isinstance(method, str):
+        funcs = {"median": np.nanmedian, "mean": np.nanmean}
+        if method not in funcs:
+            raise ValueError(f"method doit être 'median' ou 'mean' (reçu : {method!r})")
+        method = funcs[method]
     return lc.bin(time_bin_size=bin_size, aggregate_func=method)
 
 

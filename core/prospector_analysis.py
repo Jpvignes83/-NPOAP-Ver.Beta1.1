@@ -852,12 +852,15 @@ class ProspectorAnalyzer:
             
             # Créer le modèle avec les paramètres
             # SpecModel/SedModel prend 'sps' comme premier paramètre positionnel ou nommé
-            if SedModel is None:
+            # (variable locale : l'affectation de SedModel dans cette fonction le rendait
+            # local et provoquait UnboundLocalError avant même le test « is None »)
+            sed_model_cls = globals().get("SedModel")
+            if sed_model_cls is None:
                 # Si SedModel n'a pas été importé, essayer de le récupérer dynamiquement
                 from prospect.models import SpecModel
-                SedModel = SpecModel
+                sed_model_cls = SpecModel
             
-            model = SedModel(sps=ssp_basis, **model_params)
+            model = sed_model_cls(sps=ssp_basis, **model_params)
             logger.info("Modèle Prospector configuré avec succès")
             self.model = model
             return model
