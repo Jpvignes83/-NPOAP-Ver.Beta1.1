@@ -1066,7 +1066,7 @@ class TransientPhotometryTab(ttk.Frame):
                 self.after(0, lambda: messagebox.showinfo("Info", "Aucun résultat trouvé"))
         except Exception as e:
             logger.error("Erreur recherche Astro-COLIBRI: %s", e, exc_info=True)
-            self.after(0, lambda: messagebox.showerror("Erreur", "Erreur recherche Astro-COLIBRI:\n%s" % e))
+            self.after(0, lambda e=e: messagebox.showerror("Erreur", "Erreur recherche Astro-COLIBRI:\n%s" % e))
 
     def _display_colibri_results(self):
         """Affiche les résultats Astro-COLIBRI."""
@@ -1115,7 +1115,7 @@ class TransientPhotometryTab(ttk.Frame):
                 self.after(0, lambda: messagebox.showinfo("Info", "Aucun détail trouvé"))
         except Exception as e:
             logger.error("Erreur détails Astro-COLIBRI: %s", e, exc_info=True)
-            self.after(0, lambda: messagebox.showerror("Erreur", "Erreur récupération détails:\n%s" % e))
+            self.after(0, lambda e=e: messagebox.showerror("Erreur", "Erreur récupération détails:\n%s" % e))
 
     def _deg_to_ra_hms(self, ra_deg):
         """Convertit RA (degrés) en chaîne hh:mm:ss."""

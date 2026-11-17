@@ -1591,7 +1591,7 @@ class OccultationsTab(ttk.Frame):
                 d = lc.occ_detect()
             except Exception as ex:
                 logger.error("SORA occ_detect: %s", ex, exc_info=True)
-                self.after(0, lambda: self._sora_analysis_set_status(f"Auto-détection échouée: {ex}"))
+                self.after(0, lambda ex=ex: self._sora_analysis_set_status(f"Auto-détection échouée: {ex}"))
                 return
 
             def done():
@@ -1661,7 +1661,7 @@ class OccultationsTab(ttk.Frame):
                 )
             except Exception as ex:
                 logger.error("SORA occ_lcfit: %s", ex, exc_info=True)
-                self.after(0, lambda: self._sora_analysis_set_status(f"Ajustement échoué: {ex}"))
+                self.after(0, lambda ex=ex: self._sora_analysis_set_status(f"Ajustement échoué: {ex}"))
                 return
 
             def done():

@@ -15,6 +15,8 @@ from matplotlib.figure import Figure
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
+logger = logging.getLogger(__name__)
+
 try:
     from core.spde_pipeline import SPDEPipeline
     SPDE_AVAILABLE = True
@@ -29,7 +31,6 @@ except ImportError as e:
     LCA_AVAILABLE = False
     logger.warning(f"LCA non disponible : {e}")
 
-logger = logging.getLogger(__name__)
 
 
 class ToolTip:
@@ -417,7 +418,7 @@ class SourceDetectionTab:
             
         except Exception as e:
             logger.error(f"Erreur lors de l'exécution du pipeline : {e}", exc_info=True)
-            self.frame.after(0, lambda: messagebox.showerror("Erreur", f"Erreur pipeline : {e}"))
+            self.frame.after(0, lambda e=e: messagebox.showerror("Erreur", f"Erreur pipeline : {e}"))
         finally:
             self.frame.after(0, self.progress.stop)
     
@@ -540,7 +541,7 @@ class SourceDetectionTab:
             
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse LCA : {e}", exc_info=True)
-            self.frame.after(0, lambda: messagebox.showerror("Erreur", f"Erreur LCA : {e}"))
+            self.frame.after(0, lambda e=e: messagebox.showerror("Erreur", f"Erreur LCA : {e}"))
         finally:
             self.frame.after(0, self.progress.stop)
     

@@ -1,4 +1,4 @@
-﻿# gui/photometry_exoplanets_tab.py
+# gui/photometry_exoplanets_tab.py
 import json
 import os
 import sys
@@ -1335,7 +1335,7 @@ class PhotometryExoplanetsTab(ttk.Frame):
             self.after(0, lambda: self.on_batch_success(res_csv))
         except Exception as e:
             logging.error(f"Batch échoué: {e}")
-            self.after(0, lambda: messagebox.showerror("Erreur Batch", str(e)))
+            self.after(0, lambda e=e: messagebox.showerror("Erreur Batch", str(e)))
 
     def update_progress_ui(self, percent):
         self.after(0, lambda: self.progress_var.set(percent))
