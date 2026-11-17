@@ -18,7 +18,9 @@ astropy>=7.2.0,<7.3
 photutils[all]>=1.6.0
 ccdproc>=2.4.0
 astroscrappy>=1.1.0
-astride>=0.3.1
+# ASTRiDE (masque des trainées dans core/stdpipe_wrapper.py) : n'est plus publié sur PyPI
+# (le paquet PyPI est obsolète / retiré) ; installation depuis GitHub (Git requis).
+astride @ git+https://github.com/dwkim78/ASTRiDE
 astroquery>=0.4.6
 reproject>=0.8
 
@@ -29,6 +31,7 @@ matplotlib>=3.10.0,<3.11
 requests>=2.33.0
 Pillow>=12.1.0
 pytz>=2024.1
+packaging>=21.0  # utils/package_check.py
 
 # Domaines NPOAP
 sora-astro>=0.3.2

@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# NPOAP — Dépendances pour REGÉNÉRER Gladeplus.h5 (développement uniquement).
+# Utilisé par : scripts/download_and_convert_glade_catalog.py et scripts/vendor/convert_glade_catalog.py
+# (l'application elle-même ne lit le .h5 qu'avec h5py, déjà dans requirements.txt).
+#
+#   pip install -r requirements_glade_build.txt
+numpy>=2.4.0,<2.5
+pandas>=1.5.0
+tables
+h5py>=3.0.0

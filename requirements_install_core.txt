@@ -16,7 +16,9 @@ astropy>=7.2.0,<7.3
 photutils[all]>=1.6.0
 ccdproc>=2.4.0
 astroscrappy>=1.1.0
-astride>=0.3.1
+# astride : retiré de ce profil « PyPI seul » car n'existe plus sur PyPI (pip échouait et
+# n'installait AUCUNE dépendance). Optionnel (masque de trainées) : voir requirements.txt
+# ou : pip install git+https://github.com/dwkim78/ASTRiDE
 astroquery>=0.4.6
 reproject>=0.8
 matplotlib>=3.10.0,<3.11

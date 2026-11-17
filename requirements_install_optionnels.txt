@@ -38,6 +38,9 @@ iminuit>=2.0
 # === VizieR FOV (visualisation réduction) : client CDS (prioritaire) + repli astroquery ===
 # git+https://github.com/cds-astro/cds.cdsclient.git
 
+# === ASTRiDE (masque de trainées satellites, core/stdpipe_wrapper.py) : plus sur PyPI, GitHub uniquement ===
+# pip install git+https://github.com/dwkim78/ASTRiDE
+
 # === IMCCE SkyBoT (système solaire, surcouches visualisation) : astroquery.imcce / solarsystem.imcce ===
 # Version de dev ex. v0.1.dev305+gd1f6e995f : construire depuis le dépôt astropy/astroquery, p.ex.
 #   pip install "git+https://github.com/astropy/astroquery.git@d1f6e995f"
