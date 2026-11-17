@@ -895,7 +895,7 @@ class LightcurveFitting(tk.Toplevel):
                                 mid_obs = t_in_transit[min_idx]
                         else:
                             mid_obs = t_in_transit[min_idx]
-                    except:
+                    except Exception:
                         # Si l'interpolation échoue, utiliser le point minimum
                         mid_obs = t_in_transit[min_idx]
                 else:
@@ -967,13 +967,13 @@ class LightcurveFitting(tk.Toplevel):
                     _, shapiro_p = shapiro(resid[oot_mask])
                 elif len(resid) > 3:
                     _, shapiro_p = shapiro(resid)
-            except: pass
+            except Exception: pass
             
             try:
                 # ACF: Calculer sur tous les résidus
                 acf_vals = acf(resid, nlags=1)
                 if len(acf_vals) > 1: acf_1 = acf_vals[1]
-            except: pass
+            except Exception: pass
 
             try:
                 # Utiliser le T0 de référence (origine de l'époque) pour calculer O-C correctement
@@ -1014,7 +1014,7 @@ class LightcurveFitting(tk.Toplevel):
                     # Essayer d'extraire Rp/Rs du modèle pylightcurve si disponible
                     # Pour l'instant, on garde l'approximation, mais on pourrait améliorer
                     # en ajustant le modèle pour trouver le meilleur Rp/Rs
-            except: pass
+            except Exception: pass
             
             try:
                 dt = np.median(np.diff(np.sort(t))) * 86400
@@ -1025,7 +1025,7 @@ class LightcurveFitting(tk.Toplevel):
                     sigma_n = np.std(binned)
                     sigma_1 = np.std(resid)
                     beta = sigma_n / (sigma_1 / np.sqrt(bin_size))
-            except: pass
+            except Exception: pass
 
         self.quality_vars["depth"].set(f"{depth:.5f}")
         self.quality_vars["sigma_oot"].set(f"{sigma_oot:.6f}")
@@ -1230,7 +1230,7 @@ class LightcurveFitting(tk.Toplevel):
                                                        kind='linear', fill_value='extrapolate', 
                                                        bounds_error=False)
                                     df_binned[col] = f_interp(jd)
-                                except:
+                                except Exception:
                                     # Si interpolation échoue, prendre la valeur moyenne
                                     df_binned[col] = df[col].mean()
                             else:
@@ -2086,7 +2086,7 @@ class LightcurveFitting(tk.Toplevel):
                         residuals = f_obs - model
                         chi2 = np.sum((residuals / f_err)**2)
                         return chi2
-                    except:
+                    except Exception:
                         return 1e10
                 else:
                     # Ajuster seulement rp_rs et t0
@@ -2134,7 +2134,7 @@ class LightcurveFitting(tk.Toplevel):
                         chi2 = np.sum((residuals / f_err)**2)
                         
                         return chi2
-                    except:
+                    except Exception:
                         return 1e10
             
             # Ajustement avec scipy.optimize.minimize
@@ -2754,7 +2754,7 @@ class LightcurveFitting(tk.Toplevel):
                     lags = np.arange(len(acf_vals))
                     ax4.plot(lags, acf_vals, 'o-', lw=2, markersize=4,
                             color=colors.get(law, "black"), label=law, alpha=0.7)
-                except:
+                except Exception:
                     pass
             ax4.axhline(0, color='black', linestyle='-', alpha=0.3)
             ax4.axhline(0.2, color='red', linestyle='--', alpha=0.5, label='Seuil ±0.2')
@@ -2854,7 +2854,7 @@ class LightcurveFitting(tk.Toplevel):
                 ax4.set_title("Autocorrélation des Résidus")
                 ax4.legend()
                 ax4.grid(True, alpha=0.3)
-            except:
+            except Exception:
                 ax4.text(0.5, 0.5, "Erreur calcul ACF", ha='center', va='center', transform=ax4.transAxes)
             
             # Graphique 5: Résidus vs modèle

@@ -930,7 +930,7 @@ class DataAnalysisTab:
             min_p = float(self.entry_min_p.get())
             max_p = float(self.entry_max_p.get())
             if min_p >= max_p: raise ValueError
-        except:
+        except Exception:
             messagebox.showerror("Erreur", "Vérifiez les valeurs Min/Max Période.")
             return
 
@@ -1792,24 +1792,24 @@ Note : Cherchez des transits ou des signaux TTV croisés à ces périodes.
                     try: 
                         value = float(line.split(':')[1].split('jours')[0].strip())
                         data['P_orb'] = value
-                    except: pass
+                    except Exception: pass
                 # Période de modulation TTV (P_ttv) - différente de P_orb
                 if "Période Modulation TTV" in line and "jours" in line:
                     try: 
                         # Format: "Période Modulation TTV   : {value:.4f} jours ({ratio} x P_orb)"
                         value_str = line.split(':')[1].split('jours')[0].strip()
                         data['P_ttv_days'] = float(value_str)
-                    except: pass
+                    except Exception: pass
                 # Phase phi
                 if "Phase" in line and "phi" in line.lower() and ":" in line:
                     try: data['Phi'] = float(line.split(':')[1].split('+/-')[0].strip())
-                    except: pass
+                    except Exception: pass
                 # Extraire l'amplitude TTV si disponible
                 if "Amplitude" in line and "A" in line and "+/-" in line:
                     try: data['Amp_TTV'] = float(line.split(':')[1].split('+/-')[0].strip())
-                    except: pass
+                    except Exception: pass
             return data
-        except: return None
+        except Exception: return None
     
     def transfer_to_nbody_simulation(self):
         """Transfère les paramètres des rapports vers l'onglet D (Simulation N-body)."""

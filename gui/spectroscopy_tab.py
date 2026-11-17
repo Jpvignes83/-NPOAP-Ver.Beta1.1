@@ -921,7 +921,7 @@ class SpectroscopyTab(ttk.Frame):
                                             w = WCS(header)
                                             pix = np.arange(len(flux_data))
                                             wavelength = w.pixel_to_world(pix) * u.AA
-                                        except:
+                                        except Exception:
                                             # Si WCS échoue, utiliser un axe artificiel
                                             wavelength = np.arange(len(flux_data)) * u.AA
                                             logger.warning("WCS non disponible, utilisation d'un axe artificiel")
@@ -951,7 +951,7 @@ class SpectroscopyTab(ttk.Frame):
                                     if 'BUNIT' in header:
                                         try:
                                             flux_unit = u.Unit(header['BUNIT'])
-                                        except:
+                                        except Exception:
                                             pass
                                     
                                     # Créer le Quantity astropy avec le tableau numpy

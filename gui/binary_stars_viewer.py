@@ -57,7 +57,7 @@ class BinaryStarsViewer(tk.Toplevel):
             try:
                 import phoebe
                 phoebe_available = True
-            except:
+            except Exception:
                 phoebe_available = False
             
             if phoebe_available and self.bundle is not None:
@@ -68,13 +68,13 @@ class BinaryStarsViewer(tk.Toplevel):
                 try:
                     self.r1 = float(self.bundle.get_value('requiv@primary', unit='solRad'))
                     self.r2 = float(self.bundle.get_value('requiv@secondary', unit='solRad'))
-                except:
+                except Exception:
                     pass
                 
                 # Demi-grand axe
                 try:
                     self.sma = float(self.bundle.get_value('sma@binary', unit='solRad'))
-                except:
+                except Exception:
                     pass
                 
                 # Ratio de masse
@@ -82,7 +82,7 @@ class BinaryStarsViewer(tk.Toplevel):
                     m1 = float(self.bundle.get_value('mass@primary', unit='solMass'))
                     m2 = float(self.bundle.get_value('mass@secondary', unit='solMass'))
                     self.q = m2 / m1 if m1 > 0 else 0.8
-                except:
+                except Exception:
                     pass
         except Exception as e:
             logger.warning(f"Impossible de charger les paramètres du bundle: {e}")
@@ -398,6 +398,6 @@ try:
         sys.modules['readline'] = MockReadline()
     import phoebe
     PHOEBE_AVAILABLE = True
-except:
+except Exception:
     PHOEBE_AVAILABLE = False
 
