@@ -105,7 +105,7 @@ def match_sources_with_gaia(phot_df, search_radius_arcsec=2.0, gaia_mag_column="
                 results.append({"ra_gaia": best["ra"], "dec_gaia": best["dec"], 
                                 gaia_mag_column: best[gaia_mag_column], "source_id": best["source_id"]})
             else: results.append({"ra_gaia": np.nan, "dec_gaia": np.nan, gaia_mag_column: np.nan, "source_id": None})
-        except: results.append({"ra_gaia": np.nan, "dec_gaia": np.nan, gaia_mag_column: np.nan, "source_id": None})
+        except Exception: results.append({"ra_gaia": np.nan, "dec_gaia": np.nan, gaia_mag_column: np.nan, "source_id": None})
     return pd.concat([phot_df.reset_index(drop=True), pd.DataFrame(results)], axis=1)
 
 def two_d_gaussian(x_array, y_array, model_norm, model_floor, model_x_mean, model_y_mean, model_x_sigma, model_y_sigma, model_theta):
@@ -673,7 +673,7 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
             try:
                 cx, cy = wcs.world_to_pixel(cc)
                 if 0 <= cx < data.shape[1] and 0 <= cy < data.shape[0]: process_coord(cx, cy, f"C{i}")
-            except: pass
+            except Exception: pass
     canvas_mpl.draw()
 
 # -------------------------------------------------------------------

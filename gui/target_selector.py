@@ -44,7 +44,7 @@ def close_previous_diagnostics():
         try:
             if win.winfo_exists():
                 win.destroy()
-        except:
+        except Exception:
             pass
     _current_diag_windows = []
 
@@ -595,7 +595,7 @@ def launch_target_selection(
     try:
         interval = ZScaleInterval()
         vmin, vmax = interval.get_limits(data)
-    except:
+    except Exception:
         vmin, vmax = np.percentile(data, [10, 90])
 
     # 3. Comparateurs : cône autour de T1 (défaut 45′)
