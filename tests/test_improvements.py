@@ -12,6 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import astropy.units as u
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord
 from astropy.time import Time
 
 # Graceful import
@@ -59,9 +61,12 @@ def matched_table():
 # Photometry tests
 # ---------------------------------------------------------------------------
 def test_airmass_zenith():
+    """Une cible placée exactement au zénith (calculée via AltAz) doit avoir un airmass ~1."""
     t = Time("2025-01-01T00:00:00")
-    am = airmass(0.0, -30.52, t, lat=-30.52, lon=0.0, elev=0)
-    assert 0.95 < am < 1.15
+    loc = EarthLocation(lat=-30.52 * u.deg, lon=0.0 * u.deg, height=0 * u.m)
+    zenith = SkyCoord(alt=90 * u.deg, az=0 * u.deg, frame=AltAz(obstime=t, location=loc)).icrs
+    am = airmass(zenith.ra.deg, zenith.dec.deg, t, lat=-30.52, lon=0.0, elev=0)
+    assert 0.99 < am < 1.05
 
 
 def test_airmass_below_horizon():
@@ -74,7 +79,8 @@ def test_compute_zero_point(matched_table):
     zp, zp_std = compute_zero_point(matched_table, airmass_val=1.2, k=0.1)
     assert zp is not None
     assert zp_std is not None
-    assert zp > 0
+    # ZP = médiane(G - mag_instrumentale) + k * airmass = -5.0 + 0.1 * 1.2 (données de test : G < mag instr.)
+    assert zp == pytest.approx(-4.88, abs=0.02)
 
 
 def test_estimate_fwhm_synthetic(synthetic_image):

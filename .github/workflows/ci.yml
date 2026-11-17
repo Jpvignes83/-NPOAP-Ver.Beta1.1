@@ -11,7 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11"]
+        # numpy>=2.4, scipy>=1.17 et astropy>=7.2 exigent Python >= 3.11 (3.10 ne peut pas s'installer)
+        python-version: ["3.11"]
 
     steps:
     - uses: actions/checkout@v4
@@ -20,14 +21,20 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
+        cache: pip
+        cache-dependency-path: requirements_install_core.txt
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest
+        # Profil « coeur » (PyPI seul, comme installation.bat) : le requirements.txt complet
+        # demande PHOEBE, Git, etc., trop lourds pour les tests unitaires.
+        pip install -r requirements_install_core.txt
+        pip install "lightkurve>=2.4.0" pytest
 
     - name: Run unit tests
+      env:
+        MPLBACKEND: Agg
       run: |
-        pytest tests/ -v --tb=short || true
-        # Note: some tests may be skipped if optional deps are missing
+        # -rs : affiche les tests ignorés (skip) ; l'échec d'un test fait échouer le job
+        python -m pytest tests/ -v --tb=short -rs

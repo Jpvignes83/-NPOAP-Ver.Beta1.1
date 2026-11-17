@@ -11,11 +11,15 @@ except ImportError:
 
 
 def test_airmass_zenith():
-    # At zenith (approx) airmass should be ~1
-    # Use a time when the target is high (simplified check)
+    # Cible placée exactement au zénith (calculée via AltAz) : airmass ~1
+    import astropy.units as u
+    from astropy.coordinates import AltAz, EarthLocation, SkyCoord
+
     t = Time("2025-01-01T00:00:00")
-    am = airmass(0.0, -30.52, t, lat=-30.52, lon=0.0, elev=0)
-    assert 0.9 < am < 1.2
+    loc = EarthLocation(lat=-30.52 * u.deg, lon=0.0 * u.deg, height=0 * u.m)
+    zenith = SkyCoord(alt=90 * u.deg, az=0 * u.deg, frame=AltAz(obstime=t, location=loc)).icrs
+    am = airmass(zenith.ra.deg, zenith.dec.deg, t, lat=-30.52, lon=0.0, elev=0)
+    assert 0.99 < am < 1.05
 
 
 def test_airmass_below_horizon():
