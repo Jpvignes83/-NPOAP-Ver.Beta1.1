@@ -2,38 +2,69 @@
 
 **NPOAP - Nouvelle Plateforme d'Observation et d'Analyse Photométrique**
 
-Version 1.0
+Version 1.0 — *compléments avril–mai 2026 : **Coefficient médian**, photométrie transitoires / astéroïdes, réduction (SNR fit), **gain caméra (PTC)** dans `config.json`, **Occultations** (SORA), Prospector/FSPS via WSL, **ExoPlanetPie natif**, **Étoiles Variables** (VSX / AAVSO) ; **mai 2026** : onglet **🔭 Contrôle NINA** (API HTTP v2 : connexion, slew, capture test, séquence multi-cibles / multi-filtres depuis les cases ☑ de l’onglet *Observation de la nuit*) ; catalogue **ExoClock** pour les éphémérides (HTTP `planets_json` + module **`exoclock`**) ; export JSON NINA depuis l’onglet nuit ; **HOPS** (libellé planète, autres planètes ExoClock dans le FOV).*
 
 **Responsable HOPS-modified** : J.P Vignes  
 **Contact** : jeanpascal.vignes@gmail.com
 
 ---
 
+## Mises à jour depuis hier 08:00
+
+- **Onglet *⭐ Etoiles* — sous-onglet 🌟 Étoiles Variables** : photométrie différentielle sur séries FITS astrométriées — requête **VSX** (VizieR) sur le champ, surimpression des variables, sélection **T1 + comparateurs Gaia** (cône 45′, |G − G_T1| ≤ 2,5), photométrie par ouvertures, courbes temps / phase et export **CSV AAVSO Extended File Format**. Inclus dans la distribution **`binary_stars`** (option **4** de `construire_distribution.bat`). Voir [§10](#10-photométrie-détoiles-variables).
+- **Onglet *🔭 Photométrie Exoplanètes* — workflow ExoPlanetPie natif (panneau droit)** : le panneau de droite, à côté de HOPS, embarque désormais une réimplémentation Python native de la chaîne **batman + ultranest + ExoTETHyS** (catalogues ExoClock & NASA Exoplanet Archive, téléchargement TESS / Kepler via **lightkurve / MAST**, slicing en cycles, ajustement bayésien, détrendage **wotan**, analyse TTV). Sorties dans `output/exoplanetpie/`. Cette intégration remplace l’ancien volet « Analyse de Données » (A→E) à droite de HOPS. Voir [§4.8](#48-workflow-exoplanetpie-natif).
+- **Nouveau profil de distribution** `photometrie_exoplanetes` : *Accueil + Photométrie Exoplanètes uniquement*. Construit via `construire_distribution.bat` → option **8**. Voir le [Manuel d'installation §10](MANUEL_INSTALLATION.md#10-lancement-de-lapplication).
+- **HOPS — Photometry (plate solve)** : le texte rouge à côté de la flèche indique le **nom de la planète** (priorité au champ **planet** du journal HOPS, sinon résolution **ExoClock** aux coordonnées **target_ra_dec**). D’autres planètes du **catalogue ExoClock** dont l’étoile hôte est dans le **disque image** (centre détecteur, rayon jusqu’aux coins) sont marquées par des **cercles cyan en pointillés** et un libellé ; la planète **principale** de la session n’y est pas répétée.
+- **HOPS — Data & Target** : après résolution SIMBAD, **Target Name** affiche le nom principal retourné (`nearest.name`), **sans** les mentions « Host of: … » parfois présentes dans les notes SIMBAD.
+- **Prospector/FSPS** : NPOAP utilise un backend WSL pour l'analyse Prospector avancée avec FSPS (`NPOAP_PROSPECTOR_BACKEND=wsl` par défaut via le lanceur).
+- **Installateurs Windows Prospector** : retirés du flux utilisateur ; la voie supportée est `Installation_fsps\prospector.bat`.
+- **Onglet *🔭 Contrôle NINA*** : pilotage à distance de **NINA** (API avancée HTTP, port **1888** par défaut) depuis le PC d’analyse — connexion, test d’équipement, slew vers la **cible cochée**, capture test, **séquence** sur toutes les cibles ☑ de *Observation de la nuit* (filtres, refroidissement, guidage, park). Paramètres enregistrés dans `config.json` → section **`nina`**. Voir [§14](#14-contrôle-nina).
+- **ExoClock (éphémérides de nuit)** : interrogation du catalogue en ligne **`https://www.exoclock.space/database/planets_json`** à chaque calcul ; le module pip **`exoclock`** sert de repli (HOPS, fonctions avancées) et est installé avec le **cœur** (`requirements_install_core.txt`). Les planètes s’affichent avec le préfixe **`[ExoClock]`** (rouge) ou **`[NASA]`** (bleu).
+- **Stabilité WSL** : exécution fiabilisée (retours d'erreur, conversion de fins de ligne, console persistante).
+- **Transitoires** : `stdpipe_wrapper` ne casse plus l'import global si ASTRiDE est indisponible ; le masque des traînées est simplement désactivé dans ce cas.
+- **Dépendances** : alignements récents autour de `lightkurve`, `synphot`, `stdpipe`, `photutils`/`astride`.
+- **PTC / gain** : après une analyse PTC ou un export PTC, le gain (e⁻/ADU) est enregistré dans `config.json` (clé `equipment.camera_gain_e_per_adu`) et réutilisé pour la prochaine **calibration** (en-tête **GAIN** + propagation de la variance, voir [§3](#3-réduction-de-données)).
+- **Dossier utilisateur** : description du profil local **`.npoap`** sous Windows, sous-dossiers et distinction avec `config.json` / `logs/`, voir [§1](#emplacements-données-npoap).
+
+---
+
 ## Table des matières
 
 1. [Vue d'ensemble](#1-vue-densemble)
+   - [Emplacements des données (dossier utilisateur `.npoap`)](#emplacements-données-npoap)
 2. [Accueil](#2-accueil)
 3. [Réduction de Données](#3-réduction-de-données)
+   - [Coefficients de transformation (Réduction)](#coef-transformation-reduction)
+   - [Analyse PTC (Gain / Read Noise)](#ptc-reduction)
 4. [Photométrie Exoplanètes (HOPS intégré)](#4-photométrie-exoplanètes)
 5. [Photométrie Astéroïdes](#5-photométrie-astéroïdes)
    - [5.1 Astrométrie Zero-Aperture](#51-astrométrie-zero-aperture)
+   - [5.2 Courbe de lumière, modèle harmonique, détrendage et ALCDEF](#52-courbe-de-lumière-modèle-harmonique-détrendage-et-alcdef)
+   - [5.2a Surimpression modèle DAMIT](#52a-damit-surimpression)
+   - [5.3 Onglet Publication (jeu validé, S-ALCDEF)](#53-onglet-publication-jeu-validé-s-alcdef)
 6. [Photométrie Transitoires](#6-photométrie-transitoires)
 7. [Analyse de Données](#7-analyse-de-données)
    - [7.1 Sous-onglet A : Détermination Période](#71-sous-onglet-a--détermination-période)
    - [7.2 Sous-onglet B : Recherche & Analyse TTV](#72-sous-onglet-b--recherche--analyse-ttv)
    - [7.3 Sous-onglet C : Analyse Système Multiple](#73-sous-onglet-c--analyse-système-multiple)
    - [7.4 Sous-onglet D : Simulation N-body](#74-sous-onglet-d--simulation-n-body)
-8. [Étoiles Binaires](#8-étoiles-binaires)
-9. [Easy Lucky Imaging](#9-easy-lucky-imaging)
+8. [Étoiles Binaires](#8-étoiles-binaires) — *sous-onglet de l’onglet principal **⭐ Etoiles***
+9. [Easy Lucky Imaging](#9-easy-lucky-imaging) — *sous-onglet de **⭐ Etoiles*** (affiché si le module est installé)
    - [9.1 Mesure de séparation](#91-mesure-de-séparation)
-10. [Analyse des outils et fichiers compatibles LcTools (TESS)](#10-analyse-des-outils-et-fichiers-compatibles-lctools-tess)
-11. [Spectroscopie](#11-spectroscopie)
-12. [Observation de la nuit](#12-observation-de-la-nuit)
-13. [Conseils généraux](#13-conseils-généraux)
+10. [Photométrie d'étoiles variables](#10-photométrie-détoiles-variables) — *sous-onglet **🌟 Étoiles Variables** de **⭐ Etoiles***
+11. [Analyse des outils et fichiers compatibles LcTools (TESS)](#11-analyse-des-outils-et-fichiers-compatibles-lctools-tess)
+12. [Spectroscopie](#12-spectroscopie)
+13. [Observation de la nuit](#13-observation-de-la-nuit)
+14. [Contrôle NINA](#14-contrôle-nina)
+15. [Occultations (SORA, PyMovie, analyse)](#15-occultations-sora-pymovie-analyse)
+16. [Conseils généraux](#16-conseils-généraux)
 
 ---
 
 ## 1. Vue d'ensemble
+
+<a id="onglet-catalogues"></a>
+<a id="analyse-amas-open-clusters"></a>
 
 NPOAP est une application complète de **réduction, photométrie et analyse** d'observations astronomiques. Elle permet de traiter des observations d'exoplanètes, d'astéroïdes, de transitoires, d'étoiles binaires et de spectroscopie, d'analyse de données.
 
@@ -41,15 +72,17 @@ L'interface principale contient plusieurs onglets dans un notebook :
 
 - **🏠 Accueil** : Configuration de base et calculateur d'échelle de pixel
 - **🛠️ Réduction de Données** : Traitement des images brutes = calibration et plate-solving
-- **🔭 Photométrie Exoplanètes** : Chaîne **HOPS** intégrée (réduction → photométrie → ajustement transit dans HOPS ; analyse avancée possible dans *Analyse de Données*)
+- **🔭 Photométrie Exoplanètes** : Chaîne **HOPS** intégrée (panneau gauche : réduction → photométrie → ajustement transit) **et** workflow **ExoPlanetPie natif** (panneau droit : **batman + ultranest + ExoTETHyS**, données ExoClock / NASA Exoplanet Archive, courbes TESS/Kepler via **lightkurve**, ajustement bayésien, TTV) — voir [§4.8](#48-workflow-exoplanetpie-natif)
 - **🛰️ Photométrie Astéroïdes** : Photométrie et astrométrie d'astéroïdes
 - **💥 Photométrie Transitoires** : Analyse d'événements transitoires
 - **📈 Analyse de Données** : Outils d'analyse avancés (périodogrammes, TTV, N-body)
-- **⭐ Étoiles Binaires** : Modélisation de systèmes binaires
-- **🌟 Easy Lucky Imaging** : Traitement d'images d'étoiles doubles et mesure de séparation
+- **⭐ Etoiles** : Regroupe jusqu’à **trois sous-onglets** — **⭐ Étoiles Binaires** (modélisation PHOEBE2), **✨ Easy Lucky Imaging** (traitement REDUC, mesure de séparation) et **🌟 Étoiles Variables** (photométrie VSX / Gaia, export AAVSO). Les sous-onglets optionnels n’apparaissent que si les modules correspondants sont installés ; la distribution **Étoiles Doubles** (option **4**) inclut les trois.
 - **📚 Catalogues** : Extraction et gestion de catalogues astronomiques (étoiles, astéroïdes, comètes, binaires, exoplanètes)
 - **🔬 Spectroscopie** : Analyse de spectres
-- **🌙 Observation de la nuit** : Éphémérides pour la nuit (astéroïdes, exoplanètes, comètes, binaires à éclipses), graphique d’altitude et export NINA
+- **🌙 Observation de la nuit** : Éphémérides pour la nuit (astéroïdes, exoplanètes, comètes, binaires à éclipses), graphique d’altitude, export JSON **NINA** (fichier de séquence) — voir [§13](#13-observation-de-la-nuit)
+- **🔭 Contrôle NINA** : Pilotage **NINA** via l’**API HTTP v2** (connexion au PC télescope, slew, capture test, séquence automatique sur les cibles cochées dans *Observation de la nuit*) — voir [§14](#14-contrôle-nina)
+- **🌑 Occultation** : Prédictions d’occultations stellaires avec **SORA** (table, carte centrée sur le site, export TXT et séquence **SharpCap** `.scs`), PyMovie et analyse SORA (voir [§15](#15-occultations-sora-pymovie-analyse))
+- **📊 Analyse d'amas** : diagramme couleur-magnitude, estimation de la distance et de l’âge d’un amas ouvert (Gaia)
 
 ### Workflow recommandé
 
@@ -57,7 +90,34 @@ L'interface principale contient plusieurs onglets dans un notebook :
 2. **Photométrie** → Extraire les courbes de lumière
 3. **Analyse de données** → Analyser les périodes, TTV, systèmes multiples
 
-**Première utilisation (distribution)** : exécutez **`INSTALLER_NPOAP_ASTROENV_WINDOWS.bat`** une fois (Miniconda + environnement conda **`astroenv`**, Python 3.11, puis `pip install -r requirements.txt` du profil). **Lancement** : **`lancement.bat`** active **astroenv** puis lance NPOAP (reproject, astropy, etc.).
+<a id="emplacements-données-npoap"></a>
+### Emplacements des données (dossier utilisateur `.npoap`)
+
+En plus des fichiers liés **au dépôt NPOAP** (dossier d’installation du programme, ex. `Documents\NPOAP\`) et de votre **répertoire de travail** (projet d’images : `science/`, `output/`, etc.), NPOAP utilise un **dossier de profil utilisateur** créé dans le **répertoire personnel** :
+
+| Système | Emplacement type |
+|--------|-------------------|
+| **Windows** | `C:\Users\<votre_compte>\.npoap` |
+| **Linux / macOS** | `~/.npoap` (c’est-à-dire `/home/<utilisateur>/.npoap` ou `/Users/<utilisateur>/.npoap`) |
+
+Ce répertoire (souvent caché sous le nom **`.npoap`**) sert de **coffre-fort local** : caches, listes, coefficients et petits paramètres **indépendants** du répertoire où se trouve le code NPOAP. Le dossier est **créé à la volée** quand une fonction en a besoin (premier usage de l’onglet concerné, etc.).
+
+**Contenu usuel (sous-dossiers et fichiers)** — les noms de répertoires sont exacts côté application :
+
+| Chemin (relatif à `.npoap`) | Rôle |
+|----------------------------|------|
+| `Coeftransformation/` | Packs de **coefficients de transformation** (photométrie, lien avec HOPS). |
+| `gaia_cache/` | **Cache** pour des accès / résolutions liés à Gaia (astrométrie rapide, etc.). |
+| `reference_images/` | **Images de référence** utilisées notamment par certains chemins de photométrie transitoire (ex. comparaison). |
+| `catalogues/` | **Catalogues** pour l’**observation de la nuit** (NEA, comètes, etc.) ; **`Gladeplus.h5`** (GLADE+) pour le classement d’alertes et l’**export NINA** : à placer ici (souvent fourni avec la distribution) ; regénération optionnelle via `scripts/download_and_convert_glade_catalog.py` et `requirements_glade_build.txt` — chemin logique `config.GLADE_CATALOG_H5_PATH`. |
+
+**À ne pas confondre :**
+
+- **`config.json`** (réglages généraux : observatoire, équipement, gain PTC, etc.) : à la **racine du dossier d’installation NPOAP** (près de `main.py` et `config.py`), *pas* dans `.npoap` — voir [§2 Accueil](#2-accueil).
+- **Clé API Astrometry.net** (fichier texte) : par défaut **`%USERPROFILE%\.astrometry_api_key`**, donc *à côté* de `.npoap` (même profil, autre nom de fichier).
+- **Journaux** de session : plutôt le dossier **`logs/`** à la **racine du dépôt NPOAP** (fichiers `npoap_<pid>.log`).
+
+Vous pouvez **sauvegarder** tout le dossier `.npoap` (sauvegarde utilisateur) indépendamment de votre répertoire d’images ou du clone git du programme.
 
 ---
 
@@ -99,13 +159,15 @@ Dans la section **Calculateur d'échelle de pixel**, vous pouvez calculer l'éch
 3. **Calculer** : Cliquez sur le bouton pour calculer l'échelle de pixel en secondes d'arc par pixel
 4. **Sauvegarder dans config.py** : Cliquez sur ce bouton pour sauvegarder les valeurs dans le fichier de configuration
 
-L'échelle de pixel calculée sera automatiquement utilisée dans l'onglet **Easy Lucky Imaging** pour les mesures de séparation angulaire.
+L'échelle de pixel calculée sera automatiquement utilisée dans le sous-onglet **✨ Easy Lucky Imaging** (onglet principal **⭐ Etoiles**) pour les mesures de séparation angulaire.
 
 **Formule utilisée** : `Échelle de pixel (arcsec/pixel) = (Taille pixel en mm / Focale en mm) × 206265`
 
 ### Sauvegarde
 
 Cliquez sur le bouton **Sauvegarder la configuration** pour enregistrer vos paramètres. Ces informations seront conservées pour les prochaines sessions.
+
+Le fichier **`config.json`** (à la racine du dossier NPOAP, à côté de `config.py`) contient notamment l’**observatoire**, l’**équipement** (focale, taille de pixel, binning, etc.) et, le cas échéant, le **gain caméra** mesuré par PTC (`camera_gain_e_per_adu` en e⁻/ADU). Les valeurs par défaut se trouvent dans `config.py` ; elles sont complétées ou remplacées par ce que vous enregistrez dans l’onglet Accueil ou par l’enregistrement automatique issu de la PTC (voir [Analyse PTC](#ptc-reduction)).
 
 ---
 
@@ -161,6 +223,52 @@ répertoire_de_travail/
 4. **Charger Flats** : Sélectionnez les fichiers contenant vos images de flat
 5. **Option — Scaler les darks** : Cochez **« Scaler les darks au temps d'exposition des lights (si différent) »** si le temps d'exposition de vos darks ne correspond pas exactement à celui des images science. NPOAP extrapolera alors le master dark en le multipliant par le rapport (temps d'exposition de la light / temps d'exposition des darks), comme dans AstroImageJ. Les en-têtes FITS doivent contenir **EXPTIME** (ou **EXPOSURE**) pour les lights et les darks.
 
+<a id="ptc-reduction"></a>
+#### Analyse PTC (Gain / Read Noise)
+
+Le bouton **📈 Analyse PTC (Gain/RN)** de l'onglet Réduction permet d'estimer le **gain** (e-/ADU) et le **bruit de lecture** (e-) a partir d'images de flats (et bias optionnels).
+
+Procédure :
+
+1. Cliquer **📈 Analyse PTC (Gain/RN)**.
+2. Sélectionner les **flats** (obligatoire).
+3. Sélectionner des **bias** (optionnel mais recommandé).
+4. NPOAP regroupe les flats par **EXPTIME**, forme des paires, calcule :
+   - signal moyen : mediane de `(F1 + F2) / 2` sur ROI centrale,
+   - variance : variance de `(F1 - F2) / sqrt(2)`.
+5. Une régression linéaire `variance = a * signal + b` est effectuée sur la zone centrale des points.
+6. Résultats affichés dans le journal et sur la figure :
+   - `Gain = 1 / a` (e-/ADU),
+   - `Read Noise = Gain * sqrt(b)` (e-), si `b > 0`.
+
+Export :
+
+- Le bouton **💾 Export PTC** enregistre automatiquement :
+  - `ptc_points_*.csv` (points et valeur de fit),
+  - `ptc_summary_*.json` (gain, RN, pente, intercept, nombre de points, fichiers utilisés),
+  - `ptc_plot_*.png` (graphique).
+- Dossier de sortie :
+  - si un répertoire de travail est défini : `output/ptc/`,
+  - sinon : un dossier d'export est demandé.
+
+**Enregistrement du gain dans la configuration (pour la calibration)** :
+
+- Dès qu’un gain (e⁻/ADU) est obtenu par la PTC, NPOAP l’enregistre aussi dans **la configuration** : le fichier **`config.json`** à la racine NPOAP reçoit la valeur dans le bloc **`equipment`**, clé **`camera_gain_e_per_adu`**. Cela se produit **à la fin d’une analyse PTC réussie** et **lors d’un export PTC** (si un gain est calculé). La clé par défaut dans le code se trouve dans `config.py` (`EQUIPMENT_OBSERVATION`).
+
+**Utilisation à la calibration** (avant l’astrométrie) :
+
+- Lors de **Lancer la calibration**, si `camera_gain_e_per_adu` est défini dans la config, NPOAP l’utilise pour :
+  - recalculer le **modèle de variance** (carte en HDU `VARIANCE`, cohérent avec ce gain),
+  - écrire l’en-tête FITS **`GAIN`** sur chaque image calibrée (`output/calibrated/`) avec le commentaire indiquant l’origine (configuration / PTC). Ce gain a **priorité** sur l’en-tête d’une image brute si celui-ci est absent, erroné ou hétérogène.
+
+Pour **revenir au gain indiqué dans les FITS bruts** uniquement, supprimez la clé `camera_gain_e_per_adu` du bloc `equipment` dans `config.json` (ou remplacez-la par une valeur nulle) puis relancez l’application, ou modifiez le fichier manuellement en respectant le JSON.
+
+Bonnes pratiques :
+
+- conserver **gain / offset / binning** constants pendant la séquence,
+- éviter la saturation et couvrir plusieurs niveaux de signal,
+- fournir des paires de flats pour chaque temps d'exposition.
+
 #### Sécurités avant calibration
 
 Avant de créer les masters et de calibrer, NPOAP vérifie automatiquement :
@@ -196,7 +304,7 @@ Pour chaque image scientifique :
    - **Sans scaling** : `image = image - master_dark`
    - **Avec scaling** (case cochée) : `image = image - master_dark × (EXPTIME_light / EXPTIME_darks)`. Le temps de référence des darks est la médiane des **EXPTIME** des images dark. Si une image science n’a pas d’**EXPTIME** valide, le dark est appliqué sans scaling pour cette image (un avertissement est enregistré dans le journal).
 3. **Division par le master flat** : `image = image / master_flat`
-4. **Sauvegarde** : L'image calibrée est sauvegardée dans `output/calibrated/`
+4. **Sauvegarde** : L'image calibrée est sauvegardée dans `output/calibrated/` (image en float32, avec HDU de variance en unités ADU²). Si le **gain caméra** a été enregistré (PTC / `config.json`, voir [§ PTC](#ptc-reduction)), l’en-tête **GAIN** (e⁻/ADU) est fixé de façon cohérente pour les étapes amont (photométrie, astrométrie, etc.).
 
 **Important** : Les images calibrées sont automatiquement sauvegardées dans le dossier `output/calibrated/`. Ce dossier est ensuite utilisé pour l'astrométrie et les étapes suivantes.
 
@@ -272,13 +380,36 @@ L'astrométrie permet d'ajouter les informations de coordonnées célestes (WCS)
 
 5. **Utiliser les images calibrées** :
    - Pour la photométrie, utilisez les images du dossier `astrometry/` ou `science/` (après astrométrie)
-  
+
+<a id="coef-transformation-reduction"></a>
+### Coefficients de transformation photométrique (panneau Réduction)
+
+Dans l’onglet **Réduction de Données**, le panneau **Coefficients de transformation** permet d’ajuster une droite entre magnitude **instrumentale** (photométrie d’ouverture sur l’image) et magnitude **catalogue** (Gaia G/BP/RP déreddenées, ou Johnson B/V/Rc via APASS selon la bande choisie), avec **E(B-V)** (souvent issu d’**IRSA Dust** au centre du champ). Les **étoiles marquées variables** dans Gaia (indicateur *Var* / *phot_variable_flag*) ne sont **pas** utilisées pour la requête catalogue ; l’**équivalent n’existe pas** pour le chemin **Johnson / APASS** (sélecteur de bande).
+
+**Sur une même ligne d’outils (liée à l’image de test)** :
+
+1. **Image FITS** : image **déjà astrométrisée** (WCS céleste valide).
+2. **Filtre observateur** : saisi ou lu depuis l’en-tête (**FILTER**, etc.) ; doit être cohérent avec celui indiqué plus tard en **Photométrie astéroïdes** / **transitoires** / **HOPS** (filtrage des fichiers de coefficients).
+3. **Calcul des magnitudes** : détection d’étoiles, ouvertures et ciel ; seules les sources dont le **SNR du flux net** est **≥ 20** participent à la régression.
+4. **Afficher la courbe** : diagramme m_inst / m_cat,der vs droite ajustée (sur **toutes** les étoiles retenues par le fit — pas de clip 2σ sur ce graphique).
+5. **Sauvegarder le coefficient** : **append** d’une ligne au journal global `coefficients_journal.csv` et au **fichier paire** sous **`%USERPROFILE%\.npoap\Coeftransformation\`** (ex. `G__Gaia_G.csv` : filtre **G** × bande **Gaia G**). Chaque enregistrement mémorise le fit **de cette image** (pente, intercept, RMS, N d’étoiles, E(B-V), chemin du FITS).
+
+**Sur la ligne suivante (séparée visuellement)** — pas besoin d’ouvrir une image pour l’enregistrement, mais il faut **déjà** au moins **une** ligne sauvegardée pour le même couple filtre × bande de référence :
+
+6. **Coefficient médian** : à partir des **lignes individuelles** déjà dans le CSV paire pour ce couple, calcule des **médianes** de la pente et de l’**intercept** après **clip itéré** (écart autour de la médiane, bande type ±2σ) ; **réécrit** le fichier et ajoute **une** ligne de **synthèse** reconnue en interne par la marque d’en-tête **`fits`** (valeur `__AGG_MEDIAN_2SIG__`, inchangée pour compatibilité) avec la colonne **`mag_std`** (médiane des incertitudes des mesures retenues).
+
+**Lecture des coefficients ailleurs dans NPOAP** (bouton *Charger a,b* astéroïdes, transitoires avec l’option adaptée, chargement d’en-tête côté **HOPS** / `trans_coeff_npoap` si actif) : d’abord le **fichier paire** ; **priorité à la ligne « Coefficient médian »** (synthèse) **si elle existe** et qu’elle correspond au filtre / bande ; sinon **dernière sauvegarde** unitaire correspondante ; **à défaut** de fichier paire, repli sur le **journal** `coefficients_journal.csv` (lignes individuelles uniquement — **pas** de ligne de synthèse dans le journal).
 
 ---
 
 ## 4. Photométrie Exoplanètes
 
-Ce chapitre décrit l'onglet **Photométrie Exoplanètes** de NPOAP, qui intègre **HOPS** (HOlomon Photometric Software, v3.3.x) pour le traitement photométrique des transits. Il inclut un **résumé** du manuel utilisateur officiel HOPS (document *hops33_manual_en.pdf*, v3.3.3) puis les **spécificités NPOAP** (intégration, extensions et dépannage).
+Ce chapitre décrit l'onglet **Photométrie Exoplanètes** de NPOAP. L'onglet est désormais organisé en **deux panneaux** :
+
+- **Panneau gauche — HOPS** (HOlomon Photometric Software, v3.3.x) : pipeline photométrique complet (réduction → alignement → photométrie d'ouverture → ajustement de transit) sur vos images FITS locales.
+- **Panneau droit — Workflow ExoPlanetPie natif** (batman + ultranest + ExoTETHyS) : analyse de transits à partir de **courbes TESS / Kepler** téléchargées via **MAST** (`lightkurve`) ou de **lightcurves CSV** locales, avec récupération automatique des paramètres planète via **ExoClock** / **NASA Exoplanet Archive** et ajustement bayésien — voir [§4.8](#48-workflow-exoplanetpie-natif).
+
+Ce chapitre commence par un **résumé** du manuel utilisateur officiel HOPS (document *hops33_manual_en.pdf*, v3.3.3) puis détaille les **spécificités NPOAP** (intégration HOPS, extensions et dépannage), avant de présenter le workflow ExoPlanetPie natif.
 
 ### 4.1 Résumé du manuel officiel HOPS (référence ExoWorlds Spies)
 
@@ -326,9 +457,14 @@ Les points suivants complètent ou adaptent le comportement du manuel PDF :
 | **Réduction — masters** | En fin de calcul, HOPS-modified enregistre les masters dans le dossier de réduction : `master_bias.fits`, `master_dark.fits`, `master_darkf.fits`, `master_flat.fits` (si les jeux correspondants sont fournis). |
 | **Photometry — cible** | Bouton **Use OBJCTRA/OBJCTDEC** : lecture des coordonnées dans le header FITS, mise à jour de la cible dans le journal HOPS et positionnement de T1 si un **WCS** est disponible ; sinon invitation à lancer le **plate solve**. |
 | **Photometry — Gaia DR3** | Après **PLATE SOLVE IMAGE**, HOPS interroge **astroquery** / table **gaiadr3.gaia_source** (positions et magnitudes). La colonne **Gbp−Grp** peut s'appuyer sur BP/RP ; une colonne **diagnostic** indique si le plate solve, le rapprochement ou les magnitudes BP/RP manquent. |
+| **Photometry — plate solve (libellés)** | Après **PLATE SOLVE IMAGE**, le libellé **rouge** près de la flèche correspond au **nom de la planète** : priorité au champ **planet** du journal (si renseigné et utilisable), sinon résolution **ExoClock** au couple **target_ra_dec** ; relevé **`simbad_target_name`** ou nettoyage du **target_name** en dernier repli. L’objectif est d’éviter d’afficher seulement le nom SIMBAD de l’**étoile hôte** lorsque la planète est connue du catalogue. |
+| **Photometry — autres planètes (FOV)** | Toujours après plate solve : les **autres** entrées du **catalogue ExoClock** (même base que le fitting) dont l’**étoile hôte** tombe dans le **champ couvert par l’image** (disque centré sur le milieu du détecteur, rayon angulaire jusqu’aux quatre coins) sont indiquées par des **cercles cyan en trait discontinu** et un **libellé** (plusieurs planètes autour du même hôte sont regroupées). La planète **principale** de la session — déduite du champ **planet** ou, à défaut, de **locate_planet** au point cible — n’est **pas** dupliquée dans cette couche. |
+| **Data & Target — Target Name** | Après recherche SIMBAD par coordonnées ou par nom, la zone **Target Name** affiche le **nom résolu** (`nearest.name`) de façon **courte**, sans répéter les suffixes du type **« Host of: … »** issus des notes SIMBAD. |
 | **Photometry — variables** | Colonne **Var (Gaia DR3)** : affichage du **phot_variable_flag** (ex. **VAR** si VARIABLE, **const** si CONSTANT, **n/a** si non disponible). Pour une comparaison marquée variable, les **cercles** et le libellé **C*n*** **clignotent** (cyan / orange) pour signaler le risque photométrique. |
+| **Photometry — SNR** | La table des caractéristiques affiche une colonne **SNR** (rapport signal/bruit du flux net) en plus de **Gbp−Grp** et **Var**. Si le **gain caméra** est inconnu / invalide (non défini, non fini, ≤ 0), le SNR est **neutralisé** et affiché à **`-`** pour éviter une valeur trompeuse. |
 | **Filtres Gaia (passbands)** | Au lancement de HOPS depuis NPOAP, les passbands `GAIA_G`, `GAIA_BP`, `GAIA_RP` sont chargés automatiquement depuis `resources/filters/` (fichiers `.txt`) via `pylightcurve`, si ces fichiers sont présents. |
 | **RUN PHOTOMETRY** | Meilleur retour utilisateur pendant le traitement ; garde-fous pour les appels réseau lents (ex. **timeout** sur services externes en fin de chaîne) afin de limiter les blocages ; boîtes de dialogue de fin de traitement **devant** la fenêtre de progression. |
+| **Coefficients NPOAP (option** `trans_coeff_npoap` **)** | Si l’environnement HOPS est configuré pour charger les pente / intercept **NPOAP** (`core.transformation_coefficients.load_latest_transformation_coefficient`), la même **priorité** s’applique que côté astéroïdes : ligne **« Coefficient médian »** du CSV paire, puis dernière sauvegarde, puis journal. |
 
 ### 4.5 Ancien volet NPOAP « Exoplanètes »
 
@@ -340,6 +476,7 @@ L'ancien panneau gauche NPOAP de cet onglet (image de référence locale, workfl
 2. Suivre les **six étapes** HOPS comme dans le manuel PDF ; en cas de problème réseau, vérifier la connexion pour le plate solve et les requêtes Gaia.
 3. Consulter `hops_runtime.log` (dans le dossier ci-dessus) si une étape échoue sans message visible suffisant.
 4. Pour l'**ajustement de transit** détaillé avec les graphiques Chi², Shapiro-Wilk, etc., utiliser l'onglet **[Analyse de Données](#7-analyse-de-données)** de NPOAP sur les produits exportés par votre chaîne ; ce n'est pas décrit ici comme prolongement direct du cadre HOPS intégré.
+5. Après **plate solve** à l’étape Photometry : les **cercles cyan** et libellés « autres planètes » ne portent que sur des systèmes présents dans le **catalogue ExoClock** fourni avec **exoclock** ; tout objet absent de ce catalogue ne sera pas étiqueté, même s’il est dans le champ.
 
 ### 4.7 Choix du filtre (important)
 
@@ -366,6 +503,95 @@ Les filtres `Gaia G`, `Gaia BP`, `Gaia RP` sont disponibles dans la liste.
   - `Gaia RP` -> `COUSINS_R`
 
 Ce fallback permet de terminer le traitement, mais la solution la plus fidèle reste d'installer les passbands Gaia personnalisés (voir `MANUEL_INSTALLATION.md`).
+
+<a id="48-workflow-exoplanetpie-natif"></a>
+### 4.8 Workflow ExoPlanetPie natif (panneau droit)
+
+Le **panneau droit** de l’onglet *Photométrie Exoplanètes* embarque une réimplémentation Python **native** de la chaîne ExoPlanetPie. Ce panneau, intitulé **« Workflow ExoPlanetPie natif (batman · ultranest · ExoTETHyS) »**, est entièrement intégré à NPOAP : aucun exécutable externe, aucun dossier protégé n’est nécessaire — les sorties sont écrites dans `output/exoplanetpie/` à la racine de votre installation NPOAP.
+
+#### 4.8.1 Vue d’ensemble
+
+| Étape | Description | Bibliothèque |
+|------|-------------|---------------|
+| **Catalogues planètes** | Récupération des paramètres orbitaux et stellaires (Rp/R★, a/R★, période, T0, Teff, log g, [Fe/H]) | **ExoClock** (`planets_json` en ligne, module **`exoclock`**) + **NASA Exoplanet Archive** (TAP `pscomppars`) en fallback |
+| **Téléchargement courbes** | Recherche et téléchargement de **lightcurves TESS / Kepler** depuis le **MAST** ; export CSV (BJD, flux, erreur) par cycle | **lightkurve** (`search_lightcurve`, quality mask) |
+| **Slicing en cycles** | Découpage automatique de la lightcurve longue en cycles individuels centrés sur le T0 attendu (ephéméride courante) | NumPy |
+| **Coefficients de limb-darkening** | Calcul des LDC **Claret-4** pour le filtre choisi (TESS, Kepler, V, R, I, Gaia G/BP/RP, etc.) | **ExoTETHyS** (Phoenix_2018 → Stagger_2018 → Atlas_2000 en chaîne de repli automatique) |
+| **Détrendage / normalisation** | Détrendage **wotan biweight** avec masque transit basé sur la durée T14 | **wotan** + NumPy |
+| **Ajustement bayésien** | Ajustement du modèle de transit **batman** par **nested sampling** (Rp/R★, a/R★, b, T0) ; sortie : médianes, intervalles de confiance, log-évidence, traces | **batman-package** + **ultranest** |
+| **Diagnostics** | Tracés (folded + résidus), tableau de paramètres, χ² réduit, RMS hors transit | matplotlib intégré |
+| **Analyse TTV** | Agrégation des T0 ajustés sur **N cycles**, fit O−C et diagramme | NumPy + matplotlib |
+
+#### 4.8.2 Filtres supportés
+
+Le workflow expose un sélecteur **filtre** aligné sur la chaîne ExoTETHyS / Claret-4. Les filtres usuels sont disponibles :
+
+- **TESS**, **Kepler** (réponse satellite intégrée)
+- **JOHNSON_U / B / V**, **COUSINS_R / I**
+- **GAIA_G / GAIA_BP / GAIA_RP** (passbands EDR3)
+- bandes Sloan **u / g / r / i / z**
+
+Si le couple filtre × modèle stellaire échoue à produire des LDC (cible hors grille en Teff / log g / [Fe/H]), NPOAP applique automatiquement :
+
+1. une **clippage** des paramètres stellaires dans la plage physique du modèle (`_sanitize_stellar_for_exotethys`) ;
+2. une **chaîne de repli** entre modèles (**Phoenix_2018** → **Stagger_2018** → **Atlas_2000** → **Phoenix_2012** → **Atlas_1993**) ;
+3. en dernier recours, un **LDC générique** est utilisé et un *WARNING* est consigné dans `logs/npoap_<pid>.log`.
+
+#### 4.8.3 Sorties et arborescence
+
+Les fichiers générés sont organisés dans le répertoire `output/exoplanetpie/` :
+
+```
+output/exoplanetpie/
+├── 1_RawFiles/<planète>/                  ← CSV téléchargés depuis MAST (bruts)
+│   └── <tic_id>_<sector>_<index>.csv
+├── 2_MidtimesFiles/<lc_id>/               ← découpe en cycles
+│   └── cycle_<NNNNN>.csv
+├── 3_FitResults/<planète>/                ← résultats batman + ultranest
+│   ├── cycle_<NNNNN>_fit.json
+│   ├── cycle_<NNNNN>_trace.pdf
+│   └── cycle_<NNNNN>_folded.png
+└── 4_TTV/<planète>/
+    ├── midtimes.csv                       ← T0 ajustés par cycle
+    └── oc_diagram.png                     ← diagramme O−C
+```
+
+Toutes ces sorties peuvent être réimportées dans le workflow (bouton **Charger résultats TTV existants**) ou exploitées depuis l’onglet [§7 Analyse de Données](#7-analyse-de-données).
+
+#### 4.8.4 Bonnes pratiques
+
+- **Cible inconnue d’ExoClock** : si la planète est absente du catalogue **`planets_json`**, le workflow bascule sur la **NASA Exoplanet Archive** (table `pscomppars`, requête TAP). Vérifiez le nom de la planète (sensible aux espaces et tirets, ex. `TOI-216.01` vs `TOI-216 01`).
+- **Téléchargement long** : la première recherche `lightkurve.search_lightcurve(...)` peut prendre plusieurs minutes selon le secteur TESS et la charge du MAST. Les téléchargements sont mis en cache localement par `lightkurve` (`%USERPROFILE%\.lightkurve\cache`).
+- **Ajustement bayésien long** : `ultranest` avec 200 *live points* converge typiquement en **3–20 min** par cycle selon la durée du transit et le bruit. Pour des tests rapides, réduire **temporairement** à 50 *live points* dans `core/exoplanetpie_pipeline.py` (paramètre `n_live` de `fit_transit_batman_ultranest`).
+- **Métallicité incertaine** : la valeur **[Fe/H]** parsée depuis ExoClock est sanitisée avant ExoTETHyS (`_feh_from_exoclock_record` + clippage). Si vous observez un *WARNING* `metallicity is out of the range`, la chaîne de repli stellaire prendra automatiquement le relais.
+- **Warning *I/O operation on closed file*** : ce traceback bénin peut apparaître pendant le téléchargement `lightkurve` sous Windows ; NPOAP intercepte ces messages au niveau du logging (`utils/logging_handler._SafeStreamHandler`). Le téléchargement aboutit normalement.
+
+#### 4.8.5 Lien avec l’onglet Analyse de Données
+
+Le workflow ExoPlanetPie natif **remplace** l’ancien volet d’analyse (« A. Catalogues MAST … E. Simulation N-body ») qui occupait précédemment ce panneau droit. Les fonctionnalités déplacées vers l’onglet **📈 [Analyse de Données](#7-analyse-de-données)** restent disponibles :
+
+- **Détermination de période** ([§7.1](#71-sous-onglet-a--détermination-période))
+- **Recherche & analyse TTV** approfondie ([§7.2](#72-sous-onglet-b--recherche--analyse-ttv))
+- **Analyse système multiple** ([§7.3](#73-sous-onglet-c--analyse-système-multiple))
+- **Simulation N-body** ([§7.4](#74-sous-onglet-d--simulation-n-body))
+
+Les fichiers `midtimes.csv` produits par le workflow ExoPlanetPie natif sont **directement chargeables** dans le sous-onglet TTV de l’onglet *Analyse de Données*.
+
+#### 4.8.6 Dépendances pip
+
+Les bibliothèques suivantes sont installées par le `requirements.txt` standard et par le profil `photometrie_exoplanetes` :
+
+```
+batman-package>=2.4.9    # modèle de transit (Mandel & Agol)
+ultranest>=0.7.0          # nested sampling bayésien
+exotethys>=1.0.0          # limb-darkening (Phoenix/Stagger/Atlas)
+lightkurve>=2.4.0         # courbes TESS / Kepler via MAST
+wotan>=1.9                # détrendage robuste
+pylightcurve>=4.0.0       # passbands & primitives
+astroquery>=0.4.6         # NASA Exoplanet Archive (TAP)
+```
+
+Voir le [Manuel d'installation §4](MANUEL_INSTALLATION.md#4-installation-des-dépendances-python) pour les détails.
 
 ---
 
@@ -413,6 +639,22 @@ L'onglet **Photométrie Astéroïdes** permet de mesurer la magnitude des astér
    - **10m** = ~18 points pour 3h (moins précis)
 4. **Récupérer** : Cliquez sur "🔭 Récupérer Éphémérides"
 
+### Éphémérides et ancres : quelle position pour la collecte et les rapports ?
+
+**Ordre de priorité dans NPOAP** pour remplir la position de la cible lors de la **collecte des observations** (messages de journal du type « Position T1 pour … », champs utiles aux rapports ADES, etc.) :
+
+1. **Table d’éphémérides chargée** — Après « 🔭 Récupérer Éphémérides », si l’interpolation au **JD du milieu d’exposition** de chaque image réussit, la **RA/Dec** utilisée pour cette collecte est **uniquement celle issue de la table** (JPL Horizons). Les coordonnées **pixel** éventuellement affichées dans le journal sont obtenues en projetant cette position avec le **WCS** du fichier FITS.
+2. **Ancres manuelles** — Si **aucune** position n’a pu être fixée par les éphémérides (pas de récupération, ou échec du calcul), mais que vous avez enregistré une position T1 sur la **première** et la **dernière** image de la série, la position sur les autres images est **interpolée** entre ces deux ancres (interpolation linéaire sur la sphère en fonction du JD), comme décrit plus bas pour les objets sans ID.
+
+**Point important** : tant que les éphémérides sont **chargées et utilisées avec succès**, les **ancres ne remplacent pas** cette trajectoire dans la collecte. Si l’éphéméride est **fausse** (mauvais numéro MPC, mauvaise désignation, orbite inadaptée, confusion d’objet, etc.), les RA/Dec enregistrés pour les rapports suivront cette erreur, **même** si le pointage visuel ou les ancres sur la vraie tache seraient meilleurs.
+
+**Recommandation** :
+
+- Si vous constatez que la trajectoire modèle **ne colle pas** à l’objet sur les images : **n’utilisez pas** la table d’éphémérides pour cette session (ne pas lancer « Récupérer Éphémérides », ou enchaîner une procédure sans cette étape selon votre flux), puis placez **deux ancres** fiables sur la **vraie** cible (première et dernière image, ou deux poses bien séparées dans le temps).
+- À l’inverse, une éphéméride **correcte** reste en général **préférable sur une longue série**, car deux ancres ne font qu’approximer le mouvement par une **ligne** sur la sphère entre deux instants ; sur quelques heures c’est souvent suffisant si les clics sont bons.
+
+**Affichage à l’écran (cercle T1)** : à l’ouverture d’une image, le marqueur peut aussi provenir des mots-clés FITS **`OBJCTRA` / `OBJCTDEC`** (y compris sexagésimal avec **espaces**, ex. `06 57 57`, ou avec **deux-points**) ou d’un **clic manuel**. Ce marqueur **n’est pas** la même chose que la position « rapport » : un décalage entre cercle et log « Position T1 pour … » incite à vérifier séparément **éphéméride**, **header** et **pointage**.
+
 ### Workflow pour objets sans ID (nouvelle découverte)
 
 Si vous observez un objet qui n'a **pas encore d'ID MPC** ou qui n'est pas dans la base JPL Horizons, vous pouvez suivre ce workflow :
@@ -442,17 +684,18 @@ Si vous observez un objet qui n'a **pas encore d'ID MPC** ou qui n'est pas dans 
    En pratique, on suppose que l’objet se déplace de façon quasi linéaire sur le ciel entre la première et la dernière prise ; c’est une approximation raisonnable sur une série courte (quelques heures).
 
 4. **Configurer la photométrie** :
-   - Sur une image de référence, cliquez sur **"⭕ SET-UP PHOTOMÉTRIE"** pour définir T1/comparateurs et les apertures.
+   - Sur une image de référence, cliquez sur **« ⭕ SET-UP PHOTOMÉTRIE »** pour définir **T1**, les **comparateurs** (liste Gaia, clics sur l’image) et les **ouvertures** validées dans la fenêtre dédiée.
    - En cas de comète diffuse (FWHM instable), privilégiez le mode image par image (voir ci-dessous).
 
 5. **Résultats photométriques**
    - Mode **comète (image par image)** :
-     - Bouton **"📸 PHOTOMÉTRIE IMAGE COURANTE (Comètes)"**
+     - Bouton **« Photométrie image »** (sous le cadre *Photométrie d’Ouverture*, ou depuis la barre de navigation de la série).
      - CSV cumulatif : **`results/<objet>_photometrie_image_par_image.csv`**
-     - Colonnes : `filename, JD-UTC, date_obs, filter_used, delta-to_G, mag_T1_G, rmsMag_T1`
+     - Colonnes exportées : `filename, JD-UTC, date_obs, filter_used, delta-to_G, mag_T1_G, rmsMag_T1` — la colonne **`mag_T1_G`** contient la magnitude **déjà calibrée** dans le système de référence (Gaia G par défaut avec comparateurs, ou **bande catalogue** correspondant aux coefficients chargés si vous utilisez la **transformation** ; le nom de colonne reste historique).
    - Mode **astéroïdes (batch)** :
-     - Bouton **"📊 PHOTOMÉTRIE BATCH (Astéroïdes)"**
-     - Résultats batch standards dans `photometrie/results.csv` (+ `light_curve.txt`)
+     - Bouton **« 📊 PHOTOMÉTRIE BATCH (Astéroïdes) »**
+     - Résultats dans `photometrie/results.csv` (+ `light_curve.txt` basé sur la magnitude **différentielle** `mag_T1_fn`).
+     - Si **« Utiliser coeff. transformation »** est coché et que **a, b** ont été **chargés** avant le batch : colonnes supplémentaires **`mag_T1_ref`**, **`rms_mag_T1_ref`**, **`delta_to_ref`**, **`m_inst_T1`**, **`trans_ref_band_id`** (magnitude catalogue via `a×m_inst+b`, magnitude instrumentale `−2,5 log₁₀(flux)`, identifiant de bande).
      - Copie compilée exportée dans `results`.
 
 6. **Sans éphémérides** :
@@ -460,7 +703,7 @@ Si vous observez un objet qui n'a **pas encore d'ID MPC** ou qui n'est pas dans 
      1. positions ZA0/astrométriques déjà calculées,
      2. ancres manuelles (première/dernière image),
      3. position fixe de référence (fallback).
-   - La magnitude peut être calculée via comparateurs Gaia (si comparateurs valides).
+   - La magnitude peut être calculée via comparateurs Gaia (si comparateurs valides), ou via les **coefficients de transformation** enregistrés depuis la **Réduction** (voir *Photométrie d’ouverture* ci-dessous).
 
 7. **Après obtention de l'ID** :
    - Une fois que l'objet a reçu un ID MPC, vous pouvez relancer "🔭 Récupérer Éphémérides"
@@ -468,21 +711,29 @@ Si vous observez un objet qui n'a **pas encore d'ID MPC** ou qui n'est pas dans 
 
 ### Sélection de la cible (T1)
 
-1. **Position automatique** (si éphémérides disponibles) : Si les éphémérides sont chargées, la position de l'astéroïde est calculée automatiquement
-2. **Clic manuel** : Cliquez sur l'astéroïde dans l'image pour le sélectionner manuellement
+1. **Position automatique** (si éphémérides disponibles) : Si les éphémérides sont chargées, la position de l'astéroïde est calculée automatiquement (voir la section **Éphémérides et ancres** ci-dessus pour la priorité dans les **rapports**).
+2. **Clic manuel** : Cliquez sur l'astéroïde dans l'image pour le sélectionner manuellement.
+3. **Header FITS** : lors du chargement d’une image, le logiciel peut placer T1 à partir de **`OBJCTRA` / `OBJCTDEC`** (ou `RA` / `DEC` en secours), en interprétant les formats **sexagésimaux** classiques (séparateurs **:** ou **espaces**) ainsi que les **valeurs numériques** en degrés ou heures.
 
-### Sélection des étoiles de comparaison
+### Sélection des étoiles de comparaison (SET-UP photométrie)
 
-1. **Ouvrir la fenêtre de sélection** : Cliquez sur "Sélectionner les comps"
-2. **Critères de sélection** :
-   - Étoiles dans un rayon de 15 arcminutes
-   - Magnitude appropriée (ni trop faible, ni saturée)
-   - Exclusion automatique des étoiles variables connues (Gaia DR3)
-3. **Validation** : Cliquez sur "Valider" pour confirmer votre sélection
+1. **Ouvrir la fenêtre** : **« ⭕ SET-UP PHOTOMÉTRIE »** (cadre *Photométrie d’Ouverture*).
+2. **Placer T1** sur la cible, puis **ajouter des comparateurs** depuis la liste Gaia (clics sur l’image) ; exclusion possible des étoiles **variables** (Gaia DR3).
+3. **Valider** : ouverture de la fenêtre des **rayons d’ouverture** ; à la fin, la configuration est mémorisée pour l’image par image et le **batch**.
 
 ### Photométrie
 
 La photométrie peut être effectuée sur une image unique ou en mode batch sur toute la série. La précision de la photométrie dépend de la qualité de l'astrométrie préalable.
+
+#### Photométrie d'ouverture : filtre, Δ et coefficients de transformation
+
+Dans le sous-onglet **2. Photométrie**, le cadre **Photométrie d’Ouverture** regroupe :
+
+- **Filtre utilisé** et **Δ (m_inst → ref.)** : le filtre sert à retrouver la bonne entrée dans les fichiers de coefficients (voir [§3 — Coefficients de transformation](#coef-transformation-reduction)). Le **Δ** est recalculé automatiquement lorsque c’est possible (comparateurs Gaia **G**, ou coefficients **a**, **b**).
+- **Case « Utiliser coeff. transformation »** : si elle est cochée et que vous avez cliqué **« Charger a,b (CSV / journal) »**, la magnitude catalogue est **`mag_ref = a × m_inst + b`** (régression issue de la **Réduction**), avec **`Δ = (a − 1) × m_inst + b`** pour l’image courante. L’incertitude peut combiner l’erreur flux et **`mag_std`** lorsque le fichier le fournit (**ligne « Coefficient médian »** du CSV paire, si existante, sinon dernière sauvegarde / ligne du **journal**). **Sans** case ou **sans** a,b chargés, le logiciel conserve le mode **comparateurs Gaia G** : `mag = m_inst + Δ` avec **Δ** = médiane des `G − m_inst` sur les comparateurs.
+- **Correspondance filtre → bande catalogue** pour le chargement (fichier paire puis journal) : **G** → Gaia G ; libellés contenant **BP** → Gaia BP ; **RP** → Gaia RP ; **B** / **V** / **R** ou **Rc** → Johnson **B** / **V** / **Rc** (APASS). Le fichier attendu est du type **`<Filtre>__<Bande>.csv`** dans **`%USERPROFILE%\.npoap\Coeftransformation\`** (le segment *Bande* dépend exactement du libellé enregistré à la sauvegarde, ex. *Gaia G*, *Johnson V (APASS DR9)*). Détails de l’enregistrement : [§3 — Coefficients de transformation](#coef-transformation-reduction).
+- **Disposition** : sous la case à cocher, une **colonne de boutons** (largeur réduite) propose **Charger a,b**, **SET-UP PHOTOMÉTRIE**, **PHOTOMÉTRIE BATCH**, **Photométrie image** ; un libellé affiche l’état des coefficients (**ref_band_id**, **a**, **b**, éventuellement **σ_fit**).
+- **Batch** : si la case est cochée sans coefficients chargés, le batch est **refusé** avec un message d’avertissement. Avec coefficients, voir les colonnes **`mag_T1_ref`**, etc., dans **`photometrie/results.csv`** (résumé au **§5**, *Résultats photométriques*, mode batch).
 
 #### Méthodes d'astrométrie et leur impact sur la photométrie
 
@@ -512,12 +763,12 @@ Avant de lancer la photométrie, vous devez choisir une méthode d'astrométrie 
 
 #### Modes de photométrie
 
-1. **Photométrie image par image (Comètes)** :
-   - **Bouton** : "📸 PHOTOMÉTRIE IMAGE COURANTE (Comètes)"
+1. **Photométrie image par image (comètes ou contrôle fin)** :
+   - **Bouton** : **« Photométrie image »**
    - **Fonctionnement** :
      - Traite uniquement l'image actuellement affichée
-     - Utilise la configuration définie via **"⭕ SET-UP PHOTOMÉTRIE"**
-     - Calcule `mag_T1_G` à partir des comparateurs Gaia
+     - Utilise la configuration définie via **« ⭕ SET-UP PHOTOMÉTRIE »**
+     - Calcule une magnitude **calibrée** dans le CSV (`mag_T1_G`) : soit **médiane des comparateurs Gaia G** (`m_inst + Δ`), soit **`a×m_inst+b`** si la **transformation** est activée et **a,b** chargés
      - Met à jour un CSV cumulatif dans `results`
    - **Utilisation** :
      - Cas comètes / objets diffus (réglages fins image par image)
@@ -527,12 +778,13 @@ Avant de lancer la photométrie, vous devez choisir une méthode d'astrométrie 
      - Astrométrie effectuée (pour un positionnement précis de T1)
 
 2. **Photométrie batch (Astéroïdes)** :
-   - **Bouton** : "📊 PHOTOMÉTRIE BATCH (Astéroïdes)"
+   - **Bouton** : **« 📊 PHOTOMÉTRIE BATCH (Astéroïdes) »**
    - **Fonctionnement** :
      - Traite automatiquement **toutes les images** du dossier chargé
      - Utilise la configuration photométrique validée
      - Applique les mêmes apertures à toutes les images
-     - Génère une courbe de lumière complète
+     - Génère une courbe de lumière complète (**`light_curve.txt`** en magnitude **différentielle** `mag_T1_fn`)
+     - Si **coeff. transformation** : colonnes catalogue **`mag_T1_ref`** / erreurs dans **`results.csv`** (voir *Photométrie d’ouverture*)
    - **Utilisation** :
      - Pour traiter une série complète d'observations
      - Après avoir validé la configuration sur une image de référence
@@ -564,13 +816,13 @@ Avant de lancer la photométrie, vous devez choisir une méthode d'astrométrie 
 2. **Configuration photométrique** (image par image) :
    - Naviguez vers une image de bonne qualité (bon seeing, bon SNR)
    - Cliquez sur l'image pour sélectionner T1 (l'astéroïde)
-   - Cliquez sur "⭕ SET-UP PHOTOMÉTRIE"
+   - Cliquez sur **« ⭕ SET-UP PHOTOMÉTRIE »**
    - Configurez les apertures (rayon, annulus)
    - Sélectionnez les étoiles de comparaison
    - Validez la configuration
 
 3. **Traitement photométrique** :
-   - **Comètes** : utilisez "📸 PHOTOMÉTRIE IMAGE COURANTE (Comètes)" et avancez image par image
+   - **Comètes / image par image** : utilisez **« Photométrie image »** et avancez dans la série
    - **Astéroïdes** : utilisez "📊 PHOTOMÉTRIE BATCH (Astéroïdes)"
    - Le CSV de photométrie est compilé automatiquement dans `results`
 
@@ -702,35 +954,205 @@ Dans l'onglet **Photométrie Astéroïdes**, la section **"Paramètres Astromét
 - ❌ **Inconvénients** : RMS généralement moins bon, moins robuste
 - **À utiliser si** : Vous voulez un résultat rapide, contrôle de champ, test rapide
 
+### 5.2 Courbe de lumière, modèle harmonique, détrendage et ALCDEF
+
+Dans l’onglet **Photométrie Astéroïdes**, sous-onglet **2. Photométrie**, la colonne droite contient l’**analyse de courbe de lumière** (fichier temps / flux issu de la photométrie batch ou d’un export). Vous pouvez estimer une **période de rotation**, appliquer un **détrendage** lent, ajuster un **modèle** (Fourier ou cosinus), puis **valider** le jeu pour l’onglet **3. Publication** (voir [5.3](#53-onglet-publication-jeu-validé-s-alcdef)).
+
+**Organisation (onglet 2)** — ordre vertical approximatif :
+
+1. **Fichier courbe de lumière et détrendage** : dans le **cadre de gauche**, **Parcourir** / **Charger** une série **temps (JD-UTC) + flux** (éventuellement erreur), puis **sous** le statut de chargement, les contrôles de **détrendage** sur les données brutes (méthode, **SG pts**, **Wōtan j**, **Appliquer**) — voir [Détrendage](#détrendage-séries-longues) ci-dessous.  
+1b. **Modèle DAMIT (surimpression phase)** : sur la **même ligne** que le cadre 1, dans le **cadre de droite**, chargement optionnel du `light_curve.txt` **DAMIT** pour la surimpression sur la courbe de phase (voir [5.2a](#52a-damit-surimpression)).  
+2. **Périodogramme (Lomb-Scargle)** et **Modèle** (côte à côte).  
+3. **Graphiques** (courbe temps + phase), redimensionnés pour occuper l’espace disponible.  
+4. **Valider pour publication…** : enregistre le fichier modèle et alimente l’onglet 3 (détail en [5.3](#53-onglet-publication-jeu-validé-s-alcdef)).
+
+<span id="52a-damit-surimpression"></span>
+
+#### 5.2a Surimpression modèle DAMIT
+
+La base [**DAMIT**](https://damit.cuni.cz/) (*Database of Asteroid Models from Inversion Techniques*, Charles University) propose pour certains astéroïdes un fichier **`light_curve.txt`** à deux colonnes : **phase de rotation** (entre 0 et 1) et **flux relatif** (comme sur le graphique web du site), parfois avec une figure SVG équivalente.
+
+**Ce fichier n’est pas une courbe d’observations** : il ne contient pas de dates julienne. Si vous l’ouvrez via la zone **fichier** du cadre **1** (pas le bouton DAMIT) puis **Charger**, NPOAP affiche une erreur et vous invite à utiliser le cadre **« 1b. Modèle DAMIT »**.
+
+**Procédure recommandée**
+
+1. Chargez et traitez d’abord **votre courbe** (JD + flux) comme d’habitude ; affichez la **courbe de phase** en fixant **\(P\)**, **Lomb-Scargle** si besoin, puis **Calculer le modèle** (Fourier ou cosinus manuel) pour que la phase affichée corresponde à votre analyse.  
+2. Dans **1b**, cliquez sur **Charger light_curve.txt (DAMIT)…** et sélectionnez le fichier issu du site.  
+3. Cochez **Afficher** : une courbe **orange en tirets** (*DAMIT (modèle)*) apparaît sur le **graphique de phase** (panneau du bas), sur le **même axe de phase** que les points et le modèle rouge.  
+4. **Déphasage [0–1]** : translation en phase du modèle DAMIT pour faire coïncider les bosses avec vos observations. La valeur utilisée est un décalage additif sur la phase (modulo 1).  
+5. **Auto (aligner aux observations)** : recherche automatique du déphasage qui minimise (au sens des moindres carrés) l’écart aux points, avec un **facteur d’échelle** optimal à chaque test ; après alignement, **Échelle auto (médiane)** est activée. Vous pouvez encore affiner le déphasage à la main.  
+6. **Échelle auto (médiane)** : multiplie le modèle DAMIT pour rapprocher globalement les flux du modèle de ceux des observations (échelle dérivée des médianes). Si vous décochez cette option, le **Facteur manuel** s’applique.  
+7. **Effacer modèle** retire la surimpression et les données DAMIT chargées.
+
+**Remarques**
+
+- La surimpression sert à **comparer visuellement** la forme de phase issue du modèle publié sur DAMIT avec vos données ; ce n’est pas un ajustement publié dans le fichier `*_asteroid_model.txt` ni dans l’export ALCDEF.  
+- Après modification du **déphasage** ou du **facteur** uniquement, recliquez sur **Calculer le modèle** si le graphique ne se met pas à jour (les cases **Afficher** et **Échelle auto** déclenchent un redessin lorsque c’est possible).
+
+#### Détrendage (séries longues)
+
+La section **détrendage** est regroupée **dans le cadre 1** (sous le séparateur, après le statut de chargement). Elle recalcule la courbe **affichée** à partir des **données brutes** du fichier à chaque **Appliquer** ou à chaque **Charger** : les tendances lentes (extinction, conditions, etc.) peuvent être atténuées avant Lomb-Scargle et le modèle.
+
+Méthodes proposées (liste déroulante) :
+
+- **Aucun** : pas de modification (hors recopie depuis le brut).  
+- **Polynôme degré 1, 2 ou 3** : retrait d’un polynôme en temps (centré), en conservant un niveau proche du flux médian ; les erreurs ne sont pas modifiées.  
+- **Savitzky–Golay** : lissage puis soustraction additive ; la **fenêtre en points** peut rester vide (choix automatique) ou être saisie (nombre **impair** de points).  
+- **Wōtan biweight** / **Wōtan median** : estimateurs robustes de type `wotan.flatten` sur la durée couverte ; la fenêtre en **jours** peut rester vide (valeur dérivée de l’étendue temporelle). Ces lignes n’apparaissent **que si** le paquet Python **`wotan`** est installé (voir `requirements.txt` et les remerciements).
+
+#### Invalidation de la « validation publication »
+
+Sans recharger le fichier, la validation pour l’onglet 3 est **annulée** dès que vous :
+
+- **Appliquez** un autre détrendage ;  
+- lancez **Lancer Lomb-Scargle** ;  
+- cliquez sur **Calculer le modèle** ou **Ajuster (inversion)**.
+
+Tout **nouveau chargement** de courbe (ou rechargement automatique après photométrie batch) réinitialise aussi la validation. Il faut alors **Valider pour publication** à nouveau.
+
+#### Rôle de la section « 3. Modèle » (harmonique ou manuel)
+
+Après avoir chargé une courbe et, en général, fixé une **période \(P\)** (jours) — souvent issue du **Lomb–Scargle** —, l’étape **3** ajuste une **variation périodique** du flux dans le temps, typique d’une **courbe de rotation** d’astéroïde.
+
+**Deux modes** (libellé de l’encadré) :
+
+1. **Série de Fourier + offset (P fixe)** — *modèle harmonique*  
+   Moindres carrés **pondérés** (les erreurs de flux sont prises en compte) avec **\(P\) imposé** (champ **P (j)**). Le flux est modélisé par  
+   \[
+   \mathrm{flux} \approx b_0 + \sum_{k=1}^{N} \bigl[ a_k \cos(k\,\omega (t - t_{\mathrm{ref}})) + b_k \sin(k\,\omega (t - t_{\mathrm{ref}})) \bigr]
+   \]  
+   avec \(\omega = 2\pi / P\), et éventuellement une **dérive linéaire** (tendance lente : extinction, conditions, etc.) si la case **« Dérive linéaire (tendance / extinction) »** est cochée.
+
+   - **Harmoniques \(N\)** (valeur 1 à 8, défaut souvent 3) : nombre de termes de Fourier à la fréquence fondamentale \(1/P\) et à ses harmoniques \(k/P\).  
+   - **\(N = 1\)** : une seule sinusoïde de période \(P\).  
+   - **\(N \geq 2\)** : formes **non sinusoïdales** (deux bosses, etc.). Si la fenêtre temporelle ne couvre qu’une **faible fraction** de \(P\), une seule harmonique est souvent **mal contrainte** ; augmenter \(N\) peut améliorer l’ajustement lorsque la forme n’est pas purement sinusoïdale. L’interface peut signaler un modèle **fragile** lorsque \(\Delta t / P\) est petit.
+
+2. **Modèle manuel** \(F_0 \cdot (1 + A\cos(2\pi(t-t_0)/P))\)  
+   Si la case **« Série de Fourier + offset (P fixe) »** est **décochée**, le modèle est un **cosinus simple** : niveau **\(F_0\)**, amplitude relative **\(A\)**, phase via **\(t_0\)** (JD). Les paramètres sont ceux des champs **t0**, **A**, **F0** (éventuellement complétés après d’autres actions comme **Inversion**).
+
+#### Comment choisir \(N\)
+
+| Situation | Conseil |
+|-----------|--------|
+| Peu de points ou moins d’environ **un quart de période** couverte | Rester à **\(N = 1\) ou 2\)** ; éviter des \(N\) élevés qui sur-ajustent. |
+| Courbe à **une bosse** (à peu près sinusoïdale) | **\(N = 1\)** ou **2** suffit souvent. |
+| **Deux bosses** ou forme nettement **non sinusoïdale** | Essayer **\(N = 2\)**, puis **3** ; comparer **χ²**, les **résidus** et la **courbe de phase**. |
+| **\(N\)** grand (4–8) | Réservé à **beaucoup de points** et une **bonne couverture en phase** (souvent plusieurs rotations ou une large fraction de \(P\)). |
+
+**Méthode pratique** : partir de **\(N = 2\) ou 3**, augmenter si le modèle sous-ajuste visiblement, diminuer si la courbe modèle devient trop « bruitée » entre les points sans gain de χ².
+
+#### Interpréter **t0** et **A**
+
+- **Mode manuel** (\(F_0(1 + A\cos(\ldots))\)) :  
+  - **\(t_0\)** (JD) : époque où le **cosinus vaut +1**, donc **maximum de flux** (pour \(A > 0\)).  
+  - **\(A\)** : **amplitude relative sans dimension sur le flux**, pas directement une amplitude en **magnitudes**. En petite amplitude, \(A \approx \Delta\mathrm{flux}/F_0\) ; en ordre de grandeur si \(A \ll 1\), \(\Delta m \approx 1{,}09 \times A\) (soit \(2{,}5/\ln 10\)).
+
+- **Mode Fourier** (\(N \geq 1\)) : le modèle réel est une **somme** de cosinus et sinus ; il n’existe plus un unique « instant de maximum » comme pour une seule sinusoïde. NPOAP calcule tout de même un **\(t_0\) équivalent** et un **\(A\) approximatif** à partir de la **première harmonique** uniquement, pour remplir les champs et rapprocher l’affichage du modèle cosinus. Si **\(N \geq 2\)** et que la forme est irrégulière, **\(t_0\)** et **\(A\)** affichés sont une **simplification** : la **courbe rouge** du graphe suit le **modèle Fourier complet**.
+
+#### Graphiques (temps et phase)
+
+- **Courbe en fonction du temps (JD)** : ordre réel des observations, lacunes, dérives résiduelles ; sur de longues durées la forme de rotation peut paraître **compressée** sur l’axe temps.  
+- **Courbe en phase** : données repliées modulo **\(P\)** ; en général plus lisible pour la **morphologie** de la rotation sur une longue série.  
+- **Fourier** : la phase est construite pour **aligner la première harmonique** ; les points et le modèle sont repliables en phase de façon cohérente avec \(\alpha\) (déphasage du terme \(k=1\)).  
+- **Manuel** : la phase est basée sur \((t - t_0) \bmod P\) : **\(t_0\)** fixe l’**origine de phase** à 0 sur l’axe « phase ».  
+- **Modèle DAMIT** : si vous en avez chargé un ([5.2a](#52a-damit-surimpression)), la courbe orange apparaît **uniquement** sur ce graphique de phase, avec le même abscisse **phase 0–1** que les observations.
+
+### 5.3 Onglet Publication (jeu validé, S-ALCDEF)
+
+L’onglet **3. Publication** ne repose **pas** sur la courbe « en cours d’édition » dans l’onglet 2 : il utilise uniquement le **dernier jeu validé** explicitement.
+
+#### Bouton « Valider pour publication » (onglet 2)
+
+Après détrendage, Lomb-Scargle et modèle souhaités, cliquez sur **Valider pour publication…** (sous les graphiques). NPOAP :
+
+- enregistre un fichier texte **`{ID}_asteroid_model.txt`** ( **`ID`** dérivé du champ **ID cible** de la session, sinon du **N° MPC** saisi en Publication, sinon `UNKNOWN` ; caractères spéciaux adaptés au nom de fichier) ;  
+- emplacement par défaut : sous-dossier **`results`** du dossier d’images chargé, ou **`results`** à côté du fichier de courbe si aucun dossier de session, ou dossier choisi par dialogue ;  
+- le fichier contient des **lignes d’en-tête** (date UTC, nombre de points, méthode de détrendage, paramètres de modèle **P**, **t0**, **A**, **F0**, χ² si disponibles) puis les colonnes **JD_UTC**, **flux**, **flux_err** (deux colonnes seulement si pas d’erreurs) ;  
+- si la session contient des **comparateurs C1, C2, …** issus du **SET-UP photométrie** encore en mémoire, NPOAP interroge **Gaia DR3** (cone_search 3″) pour chaque position : en cas d’échec pour l’un d’eux, la validation est **refusée** ; en cas de succès, les **identifiants et photométrie Gaia** sont ajoutés en commentaires `# gaia_comp_*` dans le fichier modèle, et des lignes **ALCDEF** `EQUINOX=J2000.0`, `COMPNAME*n*`, `COMPRA*n*`, `COMPDEC*n*`, `COMPMAG*n*`, `COMPMAGBAND*n*` (= **GG** pour G), et si disponible `COMPCI*n*` / `COMPCIBAND*n*` (= **GBpGrp** pour BP−RP) sont **figées** pour l’**export S-ALCDEF** et le **rapport** ; s’il n’y a **aucun** comparateur dans la session, l’export reste possible **sans** ces lignes ;  
+- **fige** ce jeu en mémoire pour l’export ALCDEF et le rapport ;  
+- bascule l’affichage vers l’onglet **3. Publication**.
+
+Tant que vous n’avez pas validé, le rapport indique qu’il faut valider depuis l’onglet 2 ; le bouton **Enregistrer S-ALCDEF…** refuse l’export sans jeu validé.
+
+#### Contenu de l’onglet 3
+
+- Bandeau d’**état** (jeu actif ou rappel de validation).  
+- Métadonnées (N° MPC, observateurs, MagBand, etc.) et **rapport** de soumission généré à partir du **jeu validé** uniquement.  
+- **Enregistrer S-ALCDEF…** : fichier **Simple ALCDEF** (bloc **DATA** : JD, magnitude, erreur) ; entre **STARTBLOCK** et **STARTDATA**, des lignes **métadonnées** `EQUINOX` et **COMP*** peuvent être incluses si des comparateurs Gaia ont été résolus à la validation ; des commentaires `#` en tête de fichier peuvent mentionner le chemin du `*_asteroid_model.txt`.  
+- Les paramètres **\(P\), \(A\), \(t_0\)** dans le rapport reflètent le **modèle figé au moment de la validation** ; pour un Fourier à **\(N>1\)**, la ligne « cosinus » reste une **approximation** (voir ci-dessous).
+
+#### ALCDEF et rapport de soumission (rappel)
+
+- Le fichier **S-ALCDEF** contient surtout les **données** : **JD**, **magnitude**, **erreur** (format Simple ALCDEF — voir [alcdef.org](https://alcdef.org/)). Les paramètres **\(P\), \(A\), \(t_0\)** ne font pas partie du bloc **DATA** standard.
+- Le **texte d’aide** peut mentionner un ajustement **« modèle cosinus »** avec **\(P\), \(A\), \(t_0\)** : si vous avez utilisé un **Fourier à \(N>1\)**, cette ligne résume une **approximation cosinus** ; la description scientifique complète repose sur le **tracé du modèle**, le **χ²** et les **résidus**.
+- Pour les publications ou LCDB, une **amplitude en magnitude** est souvent donnée par **écart min–max** des magnitudes (ou une définition dédiée) ; NPOAP peut aussi indiquer une **amplitude indicative en mag** dans le rapport — **distincte** de **\(A\)** (flux relatif du modèle cosinus).
+
+#### Vérifications avant envoi
+
+- Contrôler les métadonnées (bande magnétique ALCDEF, observateurs, filtre) sur le formulaire / guide [ALCDEF](https://alcdef.org/).  
+- Valider le fichier avec **ALCDEFVerify** lorsque c’est requis par la procédure de dépôt.
+
 ---
 
 ## 6. Photométrie Transitoires
 
 L'onglet **Photométrie Transitoires** est conçu pour l'analyse rapide d'événements transitoires (novae, supernovae, variables, etc.).
 
-### Workflow
+Après recherche **Astro-COLIBRI**, la fenêtre **Détails** d’un transitoire propose **Top 10 GLADE+ → NINA** : à partir de `Gladeplus.h5` (catalogue ≤ 500 Mpc typique), sélection des galaxies les plus probables sous une incertitude gaussienne sur la position de l’alerte, puis export d’un fichier JSON NINA par cible (conteneur DeepSkyObject). Le fichier `Gladeplus.h5` doit se trouver sous `%USERPROFILE%\.npoap\catalogues\` (copie depuis la distribution ou régénération développeur).
 
-Le processus est similaire à celui de la photométrie d'astéroïdes :
+### Workflow image (STDPipe)
 
-1. **Chargement d'image** : Ouvrez une image FITS
-2. **Astrométrie** : Résolution du champ (en ligne ou locale)
-3. **Sélection de la cible** : Cliquez sur l'objet transitoire
-4. **Sélection des comps** : Choisissez des étoiles de comparaison
-5. **Analyse** : Calcul automatique de la magnitude
+Le workflow principal repose sur **STDPipe** :
 
-### Différences principales
+1. **Image science** : chargez une image FITS calibrée.
+2. **Astrométrie** : utilisez le WCS existant ou lancez la résolution/ré-astrométrie.
+3. **Image de référence** : téléchargez (Pan-STARRS/SDSS/DES) ou chargez un FITS local.
+4. **Soustraction d’images** : méthode simple/hotpants/zogy/alardlupton.
+5. **Détection de transitoires** : segmentation/DAO/IRAF avec seuil et FWHM.
+6. **Photométrie calibrée** : catalogue **Gaia** ou **Pan-STARRS** (selon le sélecteur), export CSV/FITS.  
+   - **Avec le catalogue Gaia** : si l’option **« Utiliser le coefficient de transformation (priorité : « Coefficient médian » du CSV NPOAP) »** est cochée (défaut : oui), NPOAP tente d’abord **`mag = a × m_inst + b`** en lisant les coefficients sous **`%USERPROFILE%\.npoap\Coeftransformation\`** (même logique de **priorité** que l’[§3 — Coefficients de transformation](#coef-transformation-reduction) : **Coefficient médian** puis dernière sauvegarde). Le **filtre observateur** est pris du champ manuel s’il est rempli, sinon des clés d’en-tête (**FILTER**, etc.) de l’**image science**. Si aucun coefficient ne convient, **repli** : point zéro par **médiane** (m_cat − m_inst) sur les sources requêtées (comportement historique). **Pan-STARRS** : pas d’intégration de cette chaîne de coefficients (STDPipe / flux existant).  
+   - Colonnes utiles en sortie (calibration NPOAP) : ex. `npoap_description`, `calibration_mode` pour tracer la source du jeu **a, b** utilisé.
 
-- **Optimisé pour la rapidité** : Interface simplifiée pour un traitement rapide
-- **Pas de format ADES** : Les résultats sont exportés en CSV standard
-- **Analyse de séries** : Traitement par lots possible
+### Ajustement SN Ia (sncosmo : SALT2/SALT3)
+
+Un encadré **« Courbes SN Ia (optionnel, sncosmo) »** ouvre une boîte dédiée pour ajuster une courbe de lumière SN Ia :
+
+- **Entrée CSV** : colonnes par défaut `mjd`, `band`, `mag`, `mag_err` (modifiables).
+- **Filtres Gaia** : `G`, `G_Bp`, `G_Rp` (mappés vers `gaia::g`, `gaia::gbp`, `gaia::grp`).
+- **Modèles** : `salt2` ou `salt3`.
+- **Redshift** : fixe ou ajusté avec bornes.
+- **Système photométrique** : `ab` ou `vega`.
+
+### Correction du rougissement Galactique (MW)
+
+La boîte SN Ia inclut un cadre **Extinction MW (ligne de visée)** :
+
+1. Saisissez **RA/Dec** (degrés).
+2. Cliquez **Récupérer E(B-V) (SFD)** (service IRSA Dust).
+3. Cochez **Corriger extinction Galactique avant fit**.
+
+La correction est appliquée sur les magnitudes avant fit (coefficients Gaia G/BP/RP configurés dans le code). Le résultat affiche la ligne :
+**`Correction MW appliquée: E(B-V)=...`**.
+
+### Indicateurs de qualité du fit
+
+La boîte affiche explicitement :
+
+- **Bandes rejetées** par le modèle (hors domaine spectral).
+- **Drapeau `[ALERTE] FIT NON FIABLE`** si au moins un critère est détecté :
+  - `ndof < 5`
+  - `|c| > 1`
+  - covariance signalée comme non fiable (message sncosmo)
+  - une ou plusieurs bandes rejetées
 
 ### Tutoriel
 
-1. Chargez les images calibrées du transitoire
-2. Marquez la source transitoire (clic ou coordonnées)
-3. Choisissez des étoiles de comparaison stables
-4. Lancez la photométrie et suivez la magnitude vs temps
-5. Exportez la courbe de lumière pour archivage ou publication
+1. Lancez le workflow STDPipe (image science → référence → soustraction → détection → photométrie).
+2. Exportez une courbe de lumière CSV si vous souhaitez un fit SN Ia.
+3. Ouvrez la boîte **SN Ia / sncosmo** depuis l’encadré en haut de l’onglet.
+4. Chargez le CSV, choisissez `salt3` en priorité pour Gaia, définissez `z` (fixe ou borné).
+5. (Optionnel) Récupérez `E(B-V)` avec RA/Dec et appliquez la correction MW.
+6. Lancez le fit et vérifiez les indicateurs (bandes rejetées, drapeau de fiabilité).
 
 ---
 
@@ -749,7 +1171,7 @@ L'onglet **Analyse de Données** propose des outils d'analyse avancés pour les 
 
 #### But
 
-Déterminer la **période orbitale** d'une exoplanète et extraire les **mid-times de transit** à partir d'un fichier de courbe de lumière.ç
+Déterminer la **période orbitale** d'une exoplanète et extraire les **mid-times de transit** à partir d'un fichier de courbe de lumière.
 
 #### Fonctionnalités principales
 
@@ -759,6 +1181,16 @@ Déterminer la **période orbitale** d'une exoplanète et extraire les **mid-tim
   - **BLS (Box Least Squares)** : Détection de transits
   - **Plavchan** : Méthode alternative
 - **Extraction automatique des mid-times** : Génération d'un CSV de mid-times pour l'analyse TTV
+- **Affinage du temps de transit central (Tc)** : modèle **trapézoïdal** local (SciPy) depuis la fenêtre **« Voir LC avec transits »**, époque par époque
+- **Détrendage optionnel [Wōtan](https://github.com/hippke/wotan)** : dans le même viewer de fit, avec **masque transit** dérivé du Tc courant et de la largeur **T14** (voir ci-dessous)
+
+#### Affinage des mid-times (fit trapèze et option Wotan)
+
+1. Après **Voir LC avec transits (marqueurs, export mid-time.csv par période)** : la liste à gauche associe une **couleur** à chaque période retenue sur le périodogramme.
+2. **Valider tous les transits** calcule des mid-times par minimum local dans une fenêtre autour de l’épéméride ; un **clic** sur la courbe fixe ou corrige un point pour la période sélectionnée.
+3. **Affiner Tc (fit trapèze)** ouvre une fenêtre : choisissez l’**époque**, la **demi-fenêtre** (j), la **largeur transit T14** (j) et l’ingress ; lancez le **fit** (trapèze + baseline affine, pente optionnelle). Le graphique compare données et modèle ; **Appliquer Tc** enregistre le résultat (colonne **Uncertainty** et source `fit` à l’export).
+4. **Détrendage Wotan** (case à cocher) : si le module Python **`wotan`** est installé (`pip install wotan`, aussi listé dans `requirements.txt`), le segment est d’abord passé par **`wotan.flatten`** en excluant de l’estimation de tendance les points où **|t − Tc| ≤ 1,15 × T14/2** (T14 = largeur « contact à contact » saisie). Le flux est ensuite ramené vers **~1** hors transit (médiane). Paramètres : **fenêtre Wotan (j)** (vide = automatique selon l’étendue du segment), **méthode** (ex. biweight, median, mean, huber, lowess). Si `wotan` est absent, la case est désactivée et un message indique l’installation.
+5. **Conseil** : un flux déjà normalisé (~1 hors transit) facilite le fit ; Wotan est surtout utile lorsque la LC présente une **dérive lente** ou des systématiques sur l’intervalle considéré.
 
 #### Tutoriel
 
@@ -776,11 +1208,10 @@ Déterminer la **période orbitale** d'une exoplanète et extraire les **mid-tim
    - Examinez le périodogramme pour identifier le pic principal
    - La période proposée est affichée dans l'interface
 
-4. **Extraire les mid-times**
-   cet outil permet de calculer les O-C
-   - Utilisez les outils pour extraire les **mid-times de transit**
-   - Sauvegardez le CSV de mid-times
-   - Ce CSV servira d'entrée pour l'onglet B (TTV)
+4. **Extraire et affiner les mid-times**
+   - Ouvrez **Voir LC avec transits**, puis **Valider tous les transits** et/ou des **clics** sur la courbe pour fixer les mid-times.
+   - (Optionnel) Utilisez **Affiner Tc (fit trapèze)** et, si besoin, le **détrendage Wotan** pour raffiner chaque époque avant export.
+   - **Exporter mid-time.csv par période** : le CSV (Epoch, Mid_time, O-C_minutes, Uncertainty, …) sert d’entrée au sous-onglet **B (TTV)** pour les O-C et l’analyse TTV.
 
 ---
 
@@ -950,11 +1381,13 @@ Simuler numériquement les interactions gravitationnelles entre les planètes d'
 
 ## 8. Étoiles Binaires
 
-L'onglet **Étoiles Binaires** permet de modéliser et d'analyser des systèmes d'étoiles binaires à éclipses en utilisant PHOEBE2.
+*Sous-onglet de l’onglet principal **⭐ Etoiles** (libellé **⭐ Étoiles Binaires** dans la barre du second notebook).*
+
+Le sous-onglet **Étoiles Binaires** permet de modéliser et d'analyser des systèmes d'étoiles binaires à éclipses en utilisant PHOEBE2.
 
 ### Prérequis
 
-PHOEBE2 doit être installé pour utiliser cet onglet. Si ce n'est pas le cas, l'application affichera un message avec les instructions d'installation.
+PHOEBE2 doit être installé pour utiliser ce sous-onglet. Si ce n'est pas le cas, l'application affichera un message avec les instructions d'installation.
 
 ### Création d'un système
 
@@ -1029,7 +1462,9 @@ Le bouton **🎬 Visualisation 3D** ouvre une fenêtre interactive permettant de
 
 ## 9. Easy Lucky Imaging
 
-L'onglet **Easy Lucky Imaging** permet de traiter des images d'étoiles doubles/binaires avec des techniques de réduction d'images (méthodes REDUC) et de mesurer précisément la séparation et l'angle de position entre deux étoiles.
+*Sous-onglet de l’onglet principal **⭐ Etoiles** (libellé **✨ Easy Lucky Imaging** dans la barre du second notebook). Ce sous-onglet n’apparaît que si le module est disponible dans votre installation.*
+
+Le sous-onglet **Easy Lucky Imaging** permet de traiter des images d'étoiles doubles/binaires avec des techniques de réduction d'images (méthodes REDUC) et de mesurer précisément la séparation et l'angle de position entre deux étoiles.
 
 ### 9.1 Mesure de séparation
 
@@ -1068,7 +1503,7 @@ La fonction **Mesure de séparation** permet de mesurer précisément la sépara
 
 1. **Préparer l'image** :
    - Assurez-vous que l'image a été astrométriée (onglet "Réduction de Données" → Astrométrie)
-   - Chargez l'image dans l'onglet "Easy Lucky Imaging"
+   - Ouvrez l’onglet principal **⭐ Etoiles**, puis le sous-onglet **✨ Easy Lucky Imaging**, et chargez l’image
 
 2. **Ouvrir la fenêtre de mesure** :
    - Cliquez sur le bouton **"Afficher Image pour Mesure"**
@@ -1126,11 +1561,77 @@ La fonction **Mesure de séparation** permet de mesurer précisément la sépara
 
 ---
 
-## 10. Analyse des outils et fichiers compatibles LcTools (TESS)
+## 10. Photométrie d'étoiles variables
+
+*Sous-onglet **🌟 Étoiles Variables** de l’onglet principal **⭐ Etoiles**. Présent dans l’installation complète et dans la distribution **`binary_stars`** (option **4** de `construire_distribution.bat`).*
+
+Le sous-onglet **Photométrie d'étoiles variables** permet de traiter une série d’images FITS astrométriées d’une étoile variable : repérage des candidats **VSX** dans le champ, photométrie différentielle avec comparateurs **Gaia DR3**, visualisation de la courbe de lumière et export au format **AAVSO Extended File Format**.
+
+### Prérequis
+
+- **Images astrométriées** : chaque FITS doit contenir un **WCS** valide (plate-solving via l’onglet Réduction ou un outil externe).
+- **Observatoire configuré** (onglet Accueil) : latitude, longitude et altitude sont utilisés pour la conversion **BJD-TDB** à l’export AAVSO.
+- **Réseau** : la requête **VSX** (via **VizieR** / **astroquery**) et la sélection des comparateurs **Gaia DR3** nécessitent un accès Internet.
+- **Distribution allégée** : le profil **`binary_stars`** inclut `astroquery` dans son `requirements.txt`.
+
+### Chargement des images
+
+1. Ouvrez l’onglet principal **⭐ Etoiles**, puis le sous-onglet **🌟 Étoiles Variables**.
+2. **📁 Choisir le répertoire** contenant vos FITS calibrés (séries temporelles d’une même cible).
+3. Naviguez dans la série avec **⏮ ◀ ▶ ⏭** ; l’image affichée sert de référence visuelle.
+4. **Image = référence** : fixe l’image courante comme image de référence pour la photométrie (WCS requis).
+
+### Requête VSX et sélection de la cible
+
+1. Cliquez sur **🔍 Requête VSX** : NPOAP interroge le catalogue **VSX** (AAVSO) sur la boîte RA/Dec du détecteur et projette les variables sur l’image (ellipses cyan ; la variable sélectionnée en **rouge**).
+2. Seules les entrées VSX avec magnitude **G < 14** (lorsque disponible) sont listées par défaut.
+3. Sélectionnez une ligne dans la liste ou **cliquez sur une ellipse** dans l’image pour surligner la variable.
+4. **Détail** ouvre une fenêtre avec libellé VSX, coordonnées (hms/dms), type variable, type spectral, période et magnitudes max/min.
+5. Renseignez **Nom (VSX / AAVSO)**, le **filtre** photométrique (V, B, R, I, CV, CR, SU, SG, SR, SI, SZ, G, GAIA…) et, si connu, la **mag. de référence (Gaia G)**.
+
+### Photométrie (T1 + comparateurs)
+
+Workflow en trois étapes :
+
+1. **Sélection T1 + comparateurs** : ouvre le sélecteur interactif sur l’image de référence.
+   - **Clic gauche** sur T1 : recherche Gaia (Gmag) et proposition de comparateurs dans un **cône de 45′** autour de T1, avec |G − G_T1| ≤ **2,5** (jusqu’à **10** comparateurs, exclusion des étoiles marquées variables dans Gaia).
+   - Un **cercle vert** indique la zone de recherche des comparateurs.
+   - **Clic droit** : diagnostic FWHM / profil (comme les autres onglets photométriques).
+2. **Régler les ouvertures** : ajustez rayons d’ouverture et anneaux de ciel pour T1 et chaque comparateur.
+3. **Photométrie série** : lance la photométrie différentielle sur **tous** les FITS du répertoire ; une barre de progression indique l’avancement.
+
+Les magnitudes sont exprimées en **magnitude différentielle calibrée** par rapport à la magnitude Gaia G de T1 (médiane des comparateurs).
+
+### Courbes et export AAVSO
+
+Après la photométrie série, consultez les onglets du panneau droit :
+
+- **Courbe de lumière** : magnitude vs **BJD-TDB** ; binning optionnel (×1, ×2, ×4).
+- **Courbe en phase** : si une **période** et une **époque** VSX sont connues, tracé en phase normalisée [0, 1).
+
+**💾 Exporter CSV AAVSO** produit un fichier texte compatible **AAVSO Extended File Format** (observateur, coordonnées, filtre, magnitudes, erreurs, BJD-TDB) pour soumission ou archivage AAVSO.
+
+### Workflow recommandé
+
+1. Réduire et astrométrier la série (onglet Réduction ou pipeline externe).
+2. Charger le répertoire, requête VSX, identifier la variable.
+3. Fixer l’image de référence, sélectionner T1 + comparateurs, valider les ouvertures.
+4. Lancer la photométrie série, contrôler la courbe et les résidus visuels.
+5. Exporter le CSV AAVSO avec nom, filtre et magnitude de référence cohérents.
+
+### Notes pratiques
+
+- Privilégiez des comparateurs **stables**, **proches en magnitude** de T1 et **répartis** autour de la cible dans le cône de 45′.
+- Si aucun comparateur n’est retenu, élargissez la zone de clic T1, vérifiez le WCS ou choisissez une autre cible moins dense.
+- Le bouton **?** en tête du sous-onglet ouvre ce chapitre du manuel.
+
+---
+
+## 11. Analyse des outils et fichiers compatibles LcTools (TESS)
 
 Cette section documente **uniquement** le travail d’analyse et d’interopérabilité avec les **exports de type LcTools** (courbes TESS normalisées en texte) : où ils sont produits dans NPOAP, quel format ils suivent, et comment le code les **reconnaît** ensuite pour concaténation ou analyse.
 
-### 10.1 Où produire un export « type LcTools » dans l’interface
+### 11.1 Où produire un export « type LcTools » dans l’interface
 
 - Onglet principal **📚 Catalogues** → sous-onglet **🔭 Exoplanètes** → sous-onglet interne **📊 Courbe TESS : FITS → LcTools**.
 - **Étape 1 — FITS édité** : à partir d’un fichier produit TESS `*_lc.fits`, masquage des cadences en transit (NaN sur le flux en transit) et enregistrement d’une copie FITS ; les priors de transit (T₀, P, durée) peuvent venir d’**exoplanet.eu** et/ou de la **NASA Exoplanet Archive**, ou d’une saisie manuelle ; fenêtres de transit éditables à la souris si l’option est activée (voir module `core/lc_transit_pick.py`).
@@ -1139,11 +1640,11 @@ Cette section documente **uniquement** le travail d’analyse et d’interopéra
 
 En ligne de commande, le même comportement est décrit dans l’en-tête de `scripts/tess_lc_fits_to_txt.py` (arguments `--normalized-lctools`, `--norm-baseline`, `--pick-transit-windows`, `--planet-name`, `--flux-source-fits`, etc.).
 
-### 10.2 Fusion des épémérides (catalogues → script TESS/LcTools)
+### 11.2 Fusion des épémérides (catalogues → script TESS/LcTools)
 
 Le module `core/transit_catalog_merge.py` sert au **flux Catalogues → TESS → LcTools** : il fusionne les informations de transit issues **d’exoplanet.eu** (TAP) et de la **NASA Exoplanet Archive** (via astroquery) pour fournir P, T₀ et la durée de transit (T₁₄) au script, avec des règles de priorité documentées dans le script (CLI > EU > NASA selon les paramètres).
 
-### 10.3 Analyse automatique du format fichier (reconnaissance « style LcTools »)
+### 11.3 Analyse automatique du format fichier (reconnaissance « style LcTools »)
 
 Le module `core/lightcurve_tools.py` implémente la **lecture et l’homogénéisation** des courbes texte/CSV pour les usages aval (concaténation, périodogrammes, TTV, etc.).
 
@@ -1159,7 +1660,7 @@ Le module `core/lightcurve_tools.py` implémente la **lecture et l’homogénéi
 
 4. **Concaténation** (`concatenate_lightcurves`) : pour chaque fichier reconnu, les paires (temps, flux) sont extraites ; une **normalisation supplémentaire par la médiane du flux** est appliquée par fichier avant concaténation, afin d’harmoniser l’échelle entre segments.
 
-### 10.4 Résumé pratique
+### 11.4 Résumé pratique
 
 | Élément | Rôle |
 |--------|------|
@@ -1173,7 +1674,7 @@ Pour les autres fonctions de l’onglet **Catalogues** (Vizier, Gaia MPC, binair
 
 ---
 
-## 11. Spectroscopie
+## 12. Spectroscopie
 
 L'onglet **Spectroscopie** permet de charger, visualiser et analyser des spectres astronomiques. Il comprend deux types d'analyse :
 
@@ -1217,7 +1718,7 @@ Prospector permet d'inférer les propriétés stellaires des galaxies à partir 
 
 #### Prérequis
 
-- **Prospector installé** : Utilisez `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat` pour l'installation
+- **Prospector/FSPS installé via WSL** : utilisez `Installation_fsps\prospector.bat`
 - **FSPS** (optionnel) : Recommandé pour les fonctionnalités avancées
 
 #### Statut de Prospector
@@ -1225,6 +1726,7 @@ Prospector permet d'inférer les propriétés stellaires des galaxies à partir 
 L'onglet affiche automatiquement le statut de Prospector :
 - **"Installed"** : Prospector est disponible et prêt à l'emploi
 - **"Non installé"** : Cliquez sur "Installer Prospector" pour l'installer automatiquement
+- **"backend WSL + FSPS"** : l'analyse utilise l'environnement Linux WSL (recommandé)
 
 #### Fonctionnalités Prospector
 
@@ -1241,10 +1743,10 @@ L'onglet affiche automatiquement le statut de Prospector :
 
 #### Tutoriel : Analyse avec Prospector
 
-1. **Installer Prospector** (si non installé) :
-   - Cliquez sur "Installer Prospector" dans la section "Analyse de Galaxies (Prospector)"
-   - Attendez la fin de l'installation (peut prendre plusieurs minutes)
-   - Redémarrez l'application
+1. **Installer Prospector/FSPS** (si non installé) :
+   - Lancez `Installation_fsps\prospector.bat` depuis le dossier NPOAP
+   - Attendez la fin de l'installation dans WSL (peut prendre plusieurs minutes)
+   - Relancez NPOAP avec `LANCER_NPOAP_ASTROENV.bat`
 
 2. **Charger un spectre de galaxie** :
    - Cliquez sur "Charger spectre" et sélectionnez un fichier FITS ou ASCII
@@ -1280,7 +1782,7 @@ L'onglet affiche automatiquement le statut de Prospector :
 4. Examinez les quantités mesurées (EW, flux, FWHM, etc.)
 
 **Pour les galaxies (Prospector)** :
-1. Installez Prospector si nécessaire
+1. Installez Prospector/FSPS via `Installation_fsps\prospector.bat` si nécessaire
 2. Chargez un spectre de galaxie
 3. Cliquez sur "🌌 Inférer Propriétés Stellaires (SED)"
 4. Attendez les résultats de l'inférence bayésienne
@@ -1288,7 +1790,7 @@ L'onglet affiche automatiquement le statut de Prospector :
 
 ---
 
-## 12. Observation de la nuit
+## 13. Observation de la nuit
 
 L’onglet **🌙 Observation de la nuit** permet de préparer une soirée d’observation : téléchargement des catalogues locaux (MPC, AAVSO), calcul des éphémérides pour la date choisie, liste des cibles et graphique d’altitude sur la nuit astronomique, export JSON vers **NINA**.
 
@@ -1302,8 +1804,8 @@ L’onglet **🌙 Observation de la nuit** permet de préparer une soirée d’o
 
 Au calcul des éphémérides, les exoplanètes proviennent de sources combinées :
 
-- **ExoClock** (module Python `exoclock`, si installé) : **priorité principale** pour la fiche retenue en cas de doublon (notamment les magnitudes).
-- **NASA Exoplanet Archive** (TAP, table `pscomppars`, planètes en transit) : source complémentaire.
+- **ExoClock** : catalogue téléchargé à chaque calcul depuis **`https://www.exoclock.space/database/planets_json`** (éphémérides et coordonnées au format du site). En cas d’échec réseau, NPOAP tente le module Python **`exoclock`** (installé avec le cœur, voir manuel d’installation). En cas de doublon avec la NASA, la fiche **ExoClock** est retenue pour l’étiquette **`[ExoClock]`** ; les champs manquants (magnitude, période, etc.) sont complétés depuis la NASA si possible.
+- **NASA Exoplanet Archive** (TAP, table `pscomppars`, planètes en transit) : source complémentaire ; étiquette **`[NASA]`** en bleu dans la liste.
 - **ETD / VarAstro** : intégration prévue ; l’API catalogue (`/api/Search/Exoplanets`) exige une **authentification**. Sans session valide, la source ETD est **désactivée automatiquement** (pas de requêtes inutiles).
 
 Les doublons sont fusionnés avec une **clé canonique** sur le nom (insensible aux espaces, tirets, casse ; normalisation du type `WASP-12 b` → `WASP-12b`). Si la fiche prioritaire manque un champ (par ex. magnitude, période, milieu de transit, durée, profondeur), il est **complété** à partir de l’autre source lorsque possible.
@@ -1322,13 +1824,100 @@ Sélectionnez les cibles avec la case **☑** dans la première colonne ; seules
 
 Pour les astéroïdes issus de `NEA.txt`, la magnitude absolue **H** (champs fixes MPC) sert au **filtre** initial (objets avec H trop élevée exclus avant l’appel d’éphémérides). La valeur affichée dans **Mag vis** est extraite de la **réponse du service d’éphémérides MPC (MPES)** pour la date et le lieu configurés : il s’agit en principe d’une **magnitude apparente estimée** (souvent assimilée à une magnitude visuelle à l’éphéméride), et non de **H**.
 
-### Export NINA
+### Export JSON NINA (fichier de séquence)
 
-Les objets cochés peuvent être exportés en JSON pour **NINA** ; les coordonnées ICRS saisies manuellement peuvent également être exportées si l’option correspondante est activée.
+Les objets cochés peuvent être exportés en **JSON** pour import dans **NINA** (bouton dédié dans l’onglet *Observation de la nuit*) ; les coordonnées ICRS saisies manuellement peuvent également être exportées si l’option correspondante est activée. Ce fichier décrit les cibles ; pour **enchaîner pointage, filtres et acquisitions** sans quitter NPOAP, utilisez l’onglet [§14 — Contrôle NINA](#14-contrôle-nina).
 
 ---
 
-## 13. Conseils généraux
+<a id="14-controle-nina"></a>
+## 14. Contrôle NINA
+
+L’onglet **🔭 Contrôle NINA** permet de piloter **NINA** à distance via l’**API avancée HTTP** (par défaut port **1888**). NPOAP tourne en général sur un **PC portable** ; NINA sur le **PC du télescope**. Les deux machines doivent se joindre sur le **réseau local** ou via un VPN (ex. **Tailscale**).
+
+### Prérequis côté télescope
+
+1. **NINA** installé et lancé sur le PC de la station.
+2. **API avancée** activée dans NINA (plugin / options réseau — port **1888**, HTTP).
+3. Pare-feu Windows : autoriser les connexions entrantes sur ce port depuis le PC NPOAP (ou depuis le réseau Tailscale).
+4. **Ne pas** compter sur le bureau à distance seul pour joindre l’API : lancer NPOAP sur le laptop avec l’**IP Tailscale** (ou LAN) du PC NINA, ou NPOAP en `127.0.0.1` si NINA et NPOAP sont sur la **même** machine.
+
+### Connexion et configuration
+
+| Champ | Rôle |
+|--------|------|
+| **Hôte** | Adresse du PC NINA (`127.0.0.1` en local, ou IP Tailscale / LAN, ex. `100.x.x.x`) |
+| **Port** | Port API (défaut **1888**) |
+| **Protocole** | `http` ou `https` selon votre configuration NINA |
+| **💾** | Enregistre hôte, port et options dans **`config.json`** → section **`nina`** |
+
+Boutons utiles :
+
+- **Tester connexion** : vérifie l’accès à l’API et affiche un résumé de l’équipement.
+- **Connecter tout** : demande à NINA de connecter monture, caméra, roue à filtres, etc.
+
+### Slew et capture test
+
+- **Slew vers cible cochée (1 seule)** : pointe la **première** cible cochée (☑) dans l’onglet *Observation de la nuit*. Option **Slew + centrage (plate-solve NINA)** pour lancer le centrage côté NINA après le slew.
+- **Capture test** : une exposition unique avec **durée (s)** et **gain** ; NPOAP évite le filtre **Dark** actif sur la roue (bascule vers un filtre lumineux si besoin) et attend la fin de l’exposition.
+
+### Séquence multi-cibles
+
+La séquence utilise **toutes les cibles cochées**, dans l’**ordre du tableau** *Observation de la nuit* (typiquement exoplanètes préparées pour la soirée).
+
+| Option | Description |
+|--------|-------------|
+| **Filtres NINA** | Liste séparée par des virgules (ex. `G, G bp, G rp`) ; vide = filtre déjà actif dans NINA |
+| **Images/filtre** | Nombre d’images par filtre et par cible |
+| **Refroidir** / **°C** | Refroidissement caméra avant la séquence |
+| **Connecter au début** | Connexion équipements au démarrage |
+| **Guidage** | Démarrage du guidage si coché |
+| **AF / cible** | Autofocus / cible selon la configuration NINA |
+| **Park fin** | Stationnement de la monture en fin de séquence |
+
+- **▶ Lancer séquence** : enchaîne refroidissement (optionnel), connexion, puis pour chaque cible : slew (et centrage si activé), puis captures sur chaque filtre.
+- **■ Arrêter** : demande l’arrêt de la séquence en cours.
+- **Lister filtres NINA** : affiche les noms de filtres connus de la roue (utile pour remplir la liste).
+
+Le **journal** en bas de l’onglet reprend les requêtes HTTP et les messages d’erreur (ex. code 400 si filtre Dark ou paramètre manquant).
+
+### Workflow recommandé (exoplanètes)
+
+1. Onglet **🌙 Observation de la nuit** : date, types d’objets, **Calculer les éphémérides**, cocher les transits à observer.
+2. (Optionnel) **Export JSON NINA** pour archivage ou import manuel.
+3. Onglet **🔭 Contrôle NINA** : tester la connexion, ajuster filtres / refroidissement, **Lancer séquence**.
+
+---
+
+## 15. Occultations (SORA, PyMovie, analyse)
+
+L’onglet principal **🌑 Occultation** regroupe trois volets (sous-onglets du carnet interne) : **1. SORA — Prédictions**, **2. Photométrie PyMovie** et **3. Analyse SORA**. Les paragraphes ci-dessous détaillent surtout le premier.
+
+### Prérequis (environnement)
+
+Les fonctions SORA (prédiction, carte) nécessitent le paquet Python **`sora-astro`** (et ses dépendances, dont **matplotlib** et **cartopy**), en général installé dans l’environnement **astroenv** recommandé par NPOAP. Sans ce paquet, un message indique que SORA n’est pas disponible.
+
+### Site d’observation
+
+Les coordonnées utilisées pour la prédiction et pour la carte (longitude, latitude, altitude, fuseau horaire) sont celles de l’**onglet Accueil** (section observatoire). Le fuseau sert à convertir l’instant de contact en **heure locale** pour l’export SharpCap et pour les libellés ; vérifiez qu’il correspond à votre site.
+
+### Sous-onglet « 1. SORA — Prédictions »
+
+1. **Paramètres** : corps unique ou liste (une désignation par ligne, jusqu’à 20 objets), intervalle de temps en UTC (ISO), pas d’échantillonnage (s), nombre de découpages d’éphéméride (`divs`), catalogue stellaire (`gaiadr3`, `gaiaedr3`, `gaiadr2`, ou `ucac4` — ce dernier via VizieR, plus lourd).
+2. **Lancer la prédiction** : remplit la table de résultat et la liste déroulante **Occultation** (une entrée par événement prédit).
+3. **Voir la carte** : pour l’occultation sélectionnée, NPOAP appelle SORA (`plot_occ_map`) avec le site configuré, un zoom adapté, et trace éventuellement une bande d’**incertitude éphéméride** si les métadonnées SORA exposent `error_ra` / `error_dec`. La figure est enregistrée sous `output/sora_occ_maps/npoap_occ_map.png` et affichée dans le panneau de droite (zone d’affichage d’environ **960 × 720** pixels pour une lecture confortable).
+4. **Exporter la table (TXT)** : export texte de la table de prédiction.
+5. **Exporter SharpCap (.scs)** : génère un fichier de **séquence SharpCap** (éditeur de séquences) calqué sur l’esprit du modèle *Just Record* du projet **Occultation Manager** : `TARGETNAME`, notification, `WAIT UNTIL LOCALTIME` à l’heure locale (début d’enregistrement proposé **deux minutes avant** le contact central SORA), puis `CAPTURE N SECONDS LIVE FRAMES` où **N** est estimé à partir de la vitesse d’occultation et du rayon (métadonnées), avec des bornes raisonnables. Les en-têtes du fichier `.scs` renvoient vers la documentation officielle SharpCap et vers le dépôt [occultation-tools](https://github.com/labstercam/occultation-tools) (templates UTC / countdown, etc.).
+
+**Limites utiles à connaître** : `WAIT UNTIL LOCALTIME` ne porte que sur l’**heure d’horloge** du PC sous SharpCap (pas de date dans la commande) ; pour des cas délicats (passage de minuit), consultez les modèles **UTC + compte à rebours** du dépôt *occultation-tools*. L’heure locale affichée dépend du fuseau renseigné dans Accueil.
+
+### Sous-onglets « 2. Photométrie PyMovie » et « 3. Analyse SORA »
+
+Ils regroupent l’accès à PyMovie / chaîne d’analyse et aux outils d’analyse SORA prévus dans NPOAP ; le détail des boutons et chemins peut évoluer — se référer aux infobulles et au journal de l’application.
+
+---
+
+## 16. Conseils généraux
 
 ### Organisation des données
 
@@ -1381,6 +1970,6 @@ Pour toute question ou problème, consultez la documentation technique ou contac
 
 ---
 
-**NPOAP - Manuel Utilisateur v1.0** (mise à jour : onglet Observation de la nuit, sources exoplanètes, libellé Mag vis)
+**NPOAP - Manuel Utilisateur v1.0** (mise à jour : onglet **⭐ Etoiles** regroupant Étoiles binaires et Easy Lucky Imaging ; Observation de la nuit, sources exoplanètes, libellé Mag vis ; onglet **🌑 Occultation**, carte SORA et export SharpCap)
 
 *Ce manuel décrit l'utilisation de base de NPOAP. Pour les procédures d'installation, consultez le manuel d'installation séparé.*

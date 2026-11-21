@@ -14,10 +14,10 @@ def _distributions_skip_null_metadata():
 _importlib_metadata.distributions = _distributions_skip_null_metadata  # type: ignore[assignment]
 
 import tkinter as tk
-from gui.main_window import MainWindow
-import utils.logging_handler as logging_handler
-from utils.package_check import check_pylightcurve_update
-import logging
+
+from utils.tk_thread_safety import install_tk_safe_destructors
+
+install_tk_safe_destructors()
 
 
 def _install_global_toplevel_front_policy(root: tk.Tk) -> None:
@@ -53,9 +53,40 @@ def _install_global_toplevel_front_policy(root: tk.Tk) -> None:
 
 
 if __name__ == "__main__":
+    import contextlib
+    import logging
+    import os
+    import sys
+    from pathlib import Path
+
+    _npoap_dir = Path(__file__).resolve().parent
+    print(f"Interpréteur Python : {sys.executable}", flush=True)
+    _conda_env = os.environ.get("CONDA_DEFAULT_ENV", "").strip()
+    if _conda_env:
+        print(f"Environnement conda : {_conda_env}", flush=True)
+    print(f"Répertoire NPOAP : {_npoap_dir}", flush=True)
+    print("Lancement de NPOAP en cours...", flush=True)
+    print(flush=True)
+
+    import utils.logging_handler as logging_handler
+
     logging_handler.setup_logging()
+
+    # Bruit print/stderr des dépendances (exoclock, Gaia, Prospector, lightkurve…) → poubelle
+    # tant que l’interface n’est pas chargée ; le détail reste dans logs/npoap_*.log
+    _dnw = open(os.devnull, "w", encoding="utf-8")
+    try:
+        with contextlib.redirect_stdout(_dnw), contextlib.redirect_stderr(_dnw):
+            from gui.main_window import MainWindow
+    finally:
+        _dnw.close()
+
+    logging_handler.attach_console_logging()
+
+    from utils.package_check import check_pylightcurve_update
+
     logger = logging.getLogger(__name__)
-    
+
     # Vérifier la mise à jour de pylightcurve au démarrage
     try:
         update_available, installed_ver, latest_ver = check_pylightcurve_update()
@@ -73,5 +104,6 @@ if __name__ == "__main__":
     root = tk.Tk()
     _install_global_toplevel_front_policy(root)
     app = MainWindow(root)
+    logger.info("Plateforme prête")
     root.mainloop()
     

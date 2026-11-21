@@ -531,7 +531,8 @@ class NBodyFitter:
             # Lancer la simulation N-body
             try:
                 sim_data = generate_simulation(self.prior, sim_time, int(sim_time * 24))
-            except:
+            except Exception as e:
+                logger.debug(f"Simulation failed: {e}")
                 return -1e6
             
             sim_shift = 0
@@ -566,7 +567,8 @@ class NBodyFitter:
                         chi2 += -0.5 * np.sum(
                             ((self.data[i]['Tc'] - Tc_sim_aligned) / self.data[i]['Tc_err'])**2
                         )
-                    except:
+                    except Exception as e:
+                        logger.debug(f"Transit comparison failed: {e}")
                         return -1e6
             
             return chi2
@@ -584,23 +586,17 @@ class NBodyFitter:
             )
         
         # Extraire les résultats
-        self.parameters = copy.deepcopy(self.prior)
+        self.parameters = {}
         self.errors = {}
         self.quantiles = {}
-        
-        # Mettre à jour avec les résultats (si disponibles)
-        if hasattr(self.results, 'maximum_likelihood') and hasattr(self.results, 'posterior'):
+        if self.results and hasattr(self.results, 'maximum_likelihood'):
             for i, key in enumerate(freekeys):
-                idx, param_key = key.split('_')
-                idx = int(idx)
-                if param_key != 'tmid':
-                    if hasattr(self.results.maximum_likelihood, 'point'):
-                        self.parameters[idx][param_key] = self.results.maximum_likelihood.point[i]
-                    if hasattr(self.results.posterior, 'stdev'):
-                        self.errors[key] = self.results.posterior.stdev[i]
-                    if hasattr(self.results.posterior, 'errlo') and hasattr(self.results.posterior, 'errup'):
-                        self.quantiles[key] = [
-                            self.results.posterior.errlo[i],
-                            self.results.posterior.errup[i]
-                        ]
-
+                param_key = key.split('_', 1)[1] if '_' in key else key
+                self.parameters[param_key] = self.results.maximum_likelihood.point[i]
+                if hasattr(self.results.posterior, 'stdev'):
+                    self.errors[key] = self.results.posterior.stdev[i]
+                if hasattr(self.results.posterior, 'errlo') and hasattr(self.results.posterior, 'errup'):
+                    self.quantiles[key] = [
+                        self.results.posterior.errlo[i],
+                        self.results.posterior.errup[i]
+                    ]

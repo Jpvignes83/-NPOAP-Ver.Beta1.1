@@ -94,7 +94,7 @@ class LinearSeparationCalculator:
         self,
         df: pd.DataFrame,
         max_angular_separation_arcsec: float = 60.0,
-        min_angular_separation_arcsec: float = 0.5,
+        min_angular_separation_arcsec: float = 0.01,
         parallax_column: str = 'parallax'
     ) -> List[Dict]:
         """
@@ -129,11 +129,17 @@ class LinearSeparationCalculator:
         coords = SkyCoord(ra=ra_valid * u.deg, dec=dec_valid * u.deg)
         seplimit = max_angular_separation_arcsec * u.arcsec
         result = search_around_sky(coords, coords, seplimit)
-        # Compatibilité multi-versions Astropy : attributs nommés ou accès par indice (NamedTuple)
-        # Ordre typique : (idx1, idx2, angular_separation ou sep2d, [physical_separation])
-        idx1 = getattr(result, "idx_catalog1", getattr(result, "idx1", None))
-        idx2 = getattr(result, "idx_catalog2", getattr(result, "idx2", None))
-        sep_angle = getattr(result, "sep2d", getattr(result, "angular_separation", None))
+        # Astropy 6+ : CoordinateSearchResult (indices_to_first_set, indices_to_second_set, angular_separation, …)
+        # Anciennes versions : idx_catalog0 / idx_catalog1, sep2d ; accès tuple (0,1,2) en secours
+        idx1 = getattr(result, "indices_to_first_set", None)
+        idx2 = getattr(result, "indices_to_second_set", None)
+        sep_angle = getattr(result, "angular_separation", None)
+        if idx1 is None:
+            idx1 = getattr(result, "idx_catalog0", None)
+        if idx2 is None:
+            idx2 = getattr(result, "idx_catalog1", None)
+        if sep_angle is None:
+            sep_angle = getattr(result, "sep2d", None)
         if (idx1 is None or idx2 is None) and hasattr(result, "__len__") and len(result) >= 3:
             idx1, idx2 = result[0], result[1]
         if sep_angle is None and hasattr(result, "__len__") and len(result) >= 3:
@@ -225,7 +231,7 @@ class LinearSeparationCalculator:
         self,
         csv_path: Path,
         max_angular_separation_arcsec: float = 60.0,
-        min_angular_separation_arcsec: float = 0.5,
+        min_angular_separation_arcsec: float = 0.01,
         threshold_pc: float = 10.0,
         parallax_column: str = 'parallax'
     ) -> Tuple[List[Dict], List[Dict]]:
@@ -279,6 +285,9 @@ class LinearSeparationCalculator:
         if df.empty:
             raise ValueError("Le fichier CSV est vide.")
         
+        # En-têtes : BOM UTF-8 et espaces (exports Excel / Vizier)
+        df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+        
         logger.info(f"Fichier lu : {len(df)} lignes, colonnes : {list(df.columns)}")
         
         # Normaliser les noms de colonnes (casse et variantes Gaia / Vizier)
@@ -295,13 +304,19 @@ class LinearSeparationCalculator:
                         return orig
             return None
         
-        # RA : ra, RA_ICRS, ra_icrs, RA
-        ra_col = get_standard_col("ra", "RA_ICRS", "ra_icrs", "RA")
+        # RA : Gaia, Vizier (_RAJ2000), TOPCAT, etc.
+        ra_col = get_standard_col(
+            "ra", "RA_ICRS", "ra_icrs", "RA",
+            "_RAJ2000", "raj2000", "RAJ2000", "RAdeg", "ra_deg",
+        )
         if ra_col:
             df["ra"] = pd.to_numeric(df[ra_col], errors="coerce")
         
-        # DEC : dec, DE_ICRS, dec_icrs, DEC, Dec
-        dec_col = get_standard_col("dec", "DE_ICRS", "dec_icrs", "DEC", "Dec")
+        # DEC
+        dec_col = get_standard_col(
+            "dec", "DE_ICRS", "dec_icrs", "DEC", "Dec",
+            "_DEJ2000", "dej2000", "DEJ2000", "DEdeg", "de_deg",
+        )
         if dec_col:
             df["dec"] = pd.to_numeric(df[dec_col], errors="coerce")
         
@@ -310,12 +325,13 @@ class LinearSeparationCalculator:
             raise ValueError(
                 f"Colonnes manquantes : {missing_cols}. "
                 f"Colonnes disponibles : {list(df.columns)}. "
-                f"Attendu : ra (ou RA_ICRS), dec (ou DE_ICRS), parallax (ou Plx)."
+                f"Attendu : ra (ou RA_ICRS, _RAJ2000), dec (ou DE_ICRS, _DEJ2000), parallax (ou Plx)."
             )
         
         # Parallaxe : parallax, Plx, parallax_mas, PM (en mas pour Gaia)
         if parallax_column not in df.columns:
-            parallax_col = get_standard_col("parallax", "Plx", "parallax_mas", "PM", "Parallax")
+            # Ne pas utiliser « PM » : ambigu avec mouvement propre sur certains CSV
+            parallax_col = get_standard_col("parallax", "Plx", "parallax_mas", "Parallax")
             if parallax_col:
                 parallax_column = parallax_col
             else:

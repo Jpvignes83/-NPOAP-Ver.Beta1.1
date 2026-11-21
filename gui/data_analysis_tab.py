@@ -34,6 +34,7 @@ except ImportError:
 from gui.periodogram_viewer import PeriodogramViewer
 from gui.ttv_viewer import TTVViewer
 from gui.lc_markers_viewer import LCMarkersViewer
+from gui.catalogues_tab import CataloguesTab
 
 logger = logging.getLogger(__name__)
 
@@ -97,24 +98,46 @@ class ToolTip:
 class DataAnalysisTab:
     def __init__(self, parent_notebook):
         """
-        Intègre l'onglet d'analyse dans le notebook principal de l'application.
+        Conteneur d'analyse (période, TTV, etc.) : parent = notebook principal
+        ou tout frame (ex. panneau droit Photométrie Exoplanètes).
         """
+        from gui.manual_help import add_manual_help_header
+
         self.main_frame = ttk.Frame(parent_notebook)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Création des sous-onglets A, B, C
+        add_manual_help_header(self.main_frame, "7-analyse-de-données")
+
+        # Sous-onglets A–E (MAST / catalogues exoplanètes puis outils d'analyse)
         self.sub_notebook = ttk.Notebook(self.main_frame)
         self.sub_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        self.tab_catalogues_mast = ttk.Frame(self.sub_notebook)
         self.tab_period = ttk.Frame(self.sub_notebook)
         self.tab_ttv = ttk.Frame(self.sub_notebook)
         self.tab_multi = ttk.Frame(self.sub_notebook)
         self.tab_nbody = ttk.Frame(self.sub_notebook)
 
-        self.sub_notebook.add(self.tab_period, text="A. Détermination Période")
-        self.sub_notebook.add(self.tab_ttv, text="B. Recherche & Analyse TTV")
-        self.sub_notebook.add(self.tab_multi, text="C. Analyse Système Multiple")
-        self.sub_notebook.add(self.tab_nbody, text="D. Simulation N-body")
+        self.sub_notebook.add(self.tab_catalogues_mast, text="A. Catalogues MAST")
+        self.sub_notebook.add(self.tab_period, text="B. Détermination Période")
+        self.sub_notebook.add(self.tab_ttv, text="C. Recherche & Analyse TTV")
+        self.sub_notebook.add(self.tab_multi, text="D. Analyse Système Multiple")
+        self.sub_notebook.add(self.tab_nbody, text="E. Simulation N-body")
+
+        # Même interface que l'onglet Catalogues → Exoplanètes (MAST, Édition Fits, LcTools)
+        try:
+            self.catalogues_mast_panel = CataloguesTab(
+                self.tab_catalogues_mast, exoplanets_only=True
+            )
+        except Exception as e:
+            logger.exception("Échec intégration Catalogues MAST dans Analyse des données")
+            self.catalogues_mast_panel = None
+            ttk.Label(
+                self.tab_catalogues_mast,
+                text=f"Impossible de charger Catalogues MAST : {e}",
+                foreground="red",
+                wraplength=560,
+                justify="left",
+            ).pack(padx=10, pady=10, anchor="w")
 
         # Données en mémoire
         self.lc_time = None
@@ -127,6 +150,11 @@ class DataAnalysisTab:
         self.current_yerr = None # yerr final utilisé pour le fit
         self.oc_source_path = None # Chemin du fichier O-C chargé (pour rapport)
         self.lc_selected_paths = []  # Chemins absolus des LC pour concaténation (onglet A)
+        self.lc_segments = []  # Segments temporels pour workflow séquentiel BLS/transits
+        self.segment_output_dir = None
+        self.seq_epoch_items = []  # Revue séquentielle par fichier/époch
+        self.seq_epoch_cursor = 0
+        self.seq_period_ref = None
 
         self.model_x = None 
         self.model_y = None 
@@ -220,6 +248,24 @@ class DataAnalysisTab:
         self.entry_max_p.insert(0, "10.0")
         self.entry_max_p.pack(side=tk.LEFT, padx=2)
 
+        bls_opt_fr = ttk.Frame(ctrl_frame)
+        bls_opt_fr.pack(side=tk.LEFT, padx=(8, 4))
+        self._bls_detrend_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            bls_opt_fr,
+            text="Détrend poly (BLS)",
+            variable=self._bls_detrend_var,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(bls_opt_fr, text="°").pack(side=tk.LEFT)
+        self._bls_detrend_deg_var = tk.StringVar(value="2")
+        ttk.Spinbox(
+            bls_opt_fr,
+            from_=1,
+            to=5,
+            width=3,
+            textvariable=self._bls_detrend_deg_var,
+        ).pack(side=tk.LEFT, padx=(2, 0))
+
         ttk.Separator(ctrl_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
         ttk.Label(ctrl_frame, text="Calcul :").pack(side=tk.LEFT)
@@ -239,14 +285,6 @@ class DataAnalysisTab:
         viewer_container = ttk.LabelFrame(self.tab_period, text="3. Résultats Périodogramme", padding=5)
         viewer_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        perio_toolbar = ttk.Frame(viewer_container)
-        perio_toolbar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
-        ttk.Button(
-            perio_toolbar,
-            text="Voir LC avec transits (marqueurs, export mid-time.csv par période)",
-            command=self._open_lc_markers_viewer,
-        ).pack(side=tk.LEFT, padx=2)
-
         self.perio_viewer = PeriodogramViewer(viewer_container)
 
     def _refresh_lc_files_listbox(self):
@@ -255,6 +293,21 @@ class DataAnalysisTab:
                 self._lc_listbox.delete(0, tk.END)
                 for p in self.lc_selected_paths:
                     self._lc_listbox.insert(tk.END, p)
+            except tk.TclError:
+                pass
+
+    def _transfer_period_lc_list_to_ttv(self):
+        """Transfère (rafraîchit) explicitement la liste LC vers l'onglet TTV."""
+        self._refresh_lc_files_listbox()
+        messagebox.showinfo(
+            "Transfert",
+            f"Liste transférée vers TTV : {len(self.lc_selected_paths)} fichier(s).",
+        )
+        if hasattr(self, "_ttv_lc_listbox"):
+            try:
+                self._ttv_lc_listbox.delete(0, tk.END)
+                for p in self.lc_selected_paths:
+                    self._ttv_lc_listbox.insert(tk.END, p)
             except tk.TclError:
                 pass
 
@@ -330,6 +383,485 @@ class DataAnalysisTab:
             return
         LCMarkersViewer(self.main_frame.winfo_toplevel(), self.lc_time, self.lc_flux, list(markers))
 
+    def _get_period_search_range(self):
+        try:
+            min_p = float(self.entry_min_p.get())
+            max_p = float(self.entry_max_p.get())
+            if min_p <= 0 or max_p <= 0 or min_p >= max_p:
+                raise ValueError
+            return min_p, max_p
+        except Exception:
+            messagebox.showerror("Erreur", "Vérifiez les valeurs Min/Max Période.")
+            return None
+
+    @staticmethod
+    def _parse_epoch_from_filename(path):
+        bn = os.path.basename(str(path))
+        m = re.search(r"_(\d{3,7})_", bn)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _parse_date_from_filename(path):
+        bn = os.path.basename(str(path))
+        m = re.search(r"_(\d{4}-\d{2}-\d{2})_", bn)
+        return m.group(1) if m else ""
+
+    def _prepare_sequential_epoch_review(self, silent=False):
+        """Construit la file de travail séquentielle à partir des LC source."""
+        if not self.lc_selected_paths:
+            messagebox.showwarning("Fichiers", "Ajoutez d'abord des fichiers LC dans la liste.")
+            return
+        items = []
+        for p in self.lc_selected_paths:
+            ep = self._parse_epoch_from_filename(p)
+            items.append(
+                {
+                    "path": os.path.abspath(p),
+                    "epoch_file": ep,
+                    "date_file": self._parse_date_from_filename(p),
+                    "basename": os.path.basename(p),
+                }
+            )
+        items = [it for it in items if os.path.isfile(it["path"])]
+        if not items:
+            messagebox.showerror("Revue épochs", "Aucun fichier valide dans la sélection.")
+            return
+        items.sort(key=lambda it: (it["epoch_file"] is None, it["epoch_file"] if it["epoch_file"] is not None else 10**9, it["basename"]))
+        self.seq_epoch_items = items
+        self.seq_epoch_cursor = 0
+
+        markers = getattr(self.perio_viewer, "markers", None) or []
+        p0 = float(markers[0]) if markers else None
+        self.seq_period_ref = simpledialog.askfloat(
+            "Période de référence",
+            "Période de transit (jours) utilisée pour la validation Tc séquentielle :",
+            initialvalue=p0 if p0 is not None else 1.30619,
+            minvalue=1e-6,
+        )
+        if self.seq_period_ref is None:
+            self.seq_epoch_items = []
+            self.seq_epoch_cursor = 0
+            return
+        out_dir = os.path.dirname(os.path.abspath(self.lc_selected_paths[0])) if self.lc_selected_paths else os.getcwd()
+        self.oc_source_path = os.path.join(out_dir, "sequential_tc_validated.csv")
+        msg = (
+            f"{len(self.seq_epoch_items)} fichier(s) prêt(s) pour validation séquentielle Tc.\n"
+            f"Période ref = {self.seq_period_ref:.6f} j.\n"
+            f"CSV incrémental:\n{self.oc_source_path}\n"
+            "Utilisez « Ouvrir LC suivante » pour avancer fichier par fichier."
+        )
+        if not silent:
+            messagebox.showinfo("Revue épochs", msg)
+
+    def _open_next_epoch_review_item(self):
+        """Ouvre la prochaine LC pour validation Tc (fit trapèze possible, puis bouton Valider Tc)."""
+        if not self.seq_epoch_items:
+            self._prepare_sequential_epoch_review(silent=True)
+            if not self.seq_epoch_items:
+                return
+        if self.seq_period_ref is None or not np.isfinite(self.seq_period_ref):
+            messagebox.showwarning("Revue épochs", "Période de référence manquante. Relancez la préparation.")
+            return
+        if self.seq_epoch_cursor >= len(self.seq_epoch_items):
+            messagebox.showinfo("Revue épochs", "Tous les fichiers de la file ont été ouverts.")
+            return
+        self._open_epoch_review_item_at(self.seq_epoch_cursor)
+
+    def _open_prev_epoch_review_item(self):
+        """Ouvre la LC précédente dans la file séquentielle."""
+        if not self.seq_epoch_items:
+            self._prepare_sequential_epoch_review(silent=True)
+            if not self.seq_epoch_items:
+                return
+        if self.seq_period_ref is None or not np.isfinite(self.seq_period_ref):
+            messagebox.showwarning("Revue épochs", "Période de référence manquante. Relancez la préparation.")
+            return
+        if self.seq_epoch_cursor <= 1:
+            self._open_epoch_review_item_at(0)
+            return
+        self._open_epoch_review_item_at(self.seq_epoch_cursor - 2)
+
+    def _open_last_epoch_review_item(self):
+        """Ouvre directement la dernière LC de la file séquentielle."""
+        if not self.seq_epoch_items:
+            self._prepare_sequential_epoch_review(silent=True)
+            if not self.seq_epoch_items:
+                return
+        if self.seq_period_ref is None or not np.isfinite(self.seq_period_ref):
+            messagebox.showwarning("Revue épochs", "Période de référence manquante. Relancez la préparation.")
+            return
+        self._open_epoch_review_item_at(len(self.seq_epoch_items) - 1)
+
+    def _restart_epoch_review(self):
+        """Redémarre la navigation à la première LC."""
+        if not self.seq_epoch_items:
+            self._prepare_sequential_epoch_review(silent=True)
+            if not self.seq_epoch_items:
+                return
+        if self.seq_period_ref is None or not np.isfinite(self.seq_period_ref):
+            messagebox.showwarning("Revue épochs", "Période de référence manquante. Relancez la préparation.")
+            return
+        self.seq_epoch_cursor = 0
+        self._open_epoch_review_item_at(0)
+
+    def _open_epoch_review_item_at(self, index):
+        """Ouvre une LC à un index donné et avance le curseur interne."""
+        if not self.seq_epoch_items:
+            return
+        index = int(max(0, min(index, len(self.seq_epoch_items) - 1)))
+        item = self.seq_epoch_items[index]
+        self.seq_epoch_cursor = index + 1
+
+        try:
+            from core.lightcurve_tools import read_lightcurve_file
+            t, y = read_lightcurve_file(item["path"])
+        except Exception as e:
+            messagebox.showerror("Lecture LC", f"Impossible de lire:\n{item['path']}\n\n{e}")
+            return
+
+        # Recalage local de l'époch: pour une LC "une nuit", on veut forcer l'étiquette globale via le nom de fichier.
+        ep_file = item.get("epoch_file")
+        extra_cols = {
+            "Source_File": item["basename"],
+            "Date_File": item.get("date_file", ""),
+            "Epoch_File": ep_file if ep_file is not None else "",
+            "Review_Order": int(self.seq_epoch_cursor),
+        }
+        LCMarkersViewer(
+            self.main_frame.winfo_toplevel(),
+            t,
+            y,
+            [float(self.seq_period_ref)],
+            extra_export_columns=extra_cols,
+            on_validate_tc_callback=self._on_epoch_review_tc_validated,
+            on_skip_tc_callback=self._on_epoch_review_tc_skipped,
+            expected_epoch=ep_file,
+        )
+        logger.info(
+            "Validation Tc: fichier %s/%s ouvert (%s)",
+            index + 1,
+            len(self.seq_epoch_items),
+            item["basename"],
+        )
+
+    def _on_epoch_review_tc_validated(self, row):
+        """Écrit une ligne Tc dans le CSV incrémental, puis ouvre la LC suivante si auto activé."""
+        out_csv = self.oc_source_path
+        if not out_csv:
+            out_dir = os.path.dirname(os.path.abspath(self.lc_selected_paths[0])) if self.lc_selected_paths else os.getcwd()
+            out_csv = os.path.join(out_dir, "sequential_tc_validated.csv")
+            self.oc_source_path = out_csv
+        row = dict(row or {})
+        required = ["Epoch", "Mid_time", "Uncertainty", "Depth", "Period"]
+        for key in required:
+            if key not in row:
+                row[key] = np.nan
+        df_row = pd.DataFrame([row])
+        exists = os.path.exists(out_csv)
+        df_row.to_csv(out_csv, mode="a", index=False, header=not exists)
+        logger.info("Tc validé ajouté au CSV: %s", out_csv)
+        self.main_frame.after(150, self._open_next_epoch_review_item)
+
+    def _on_epoch_review_tc_skipped(self):
+        """Passe la LC courante sans enregistrer de Tc, puis ouvre la suivante."""
+        logger.info("LC ignorée (skip Tc) en revue séquentielle.")
+        self.main_frame.after(150, self._open_next_epoch_review_item)
+
+    def _build_oc_from_sequential_tc(self):
+        """Construit le master O-C à partir du CSV incrémental de validation séquentielle."""
+        path = self.oc_source_path
+        if not path or not os.path.exists(path):
+            path = filedialog.askopenfilename(
+                title="CSV de validation Tc séquentielle",
+                filetypes=[("CSV", "*.csv")],
+            )
+        if not path:
+            return
+        try:
+            master = pd.read_csv(path)
+        except Exception as e:
+            messagebox.showerror("Calcul O-C", f"Lecture impossible du CSV Tc:\n{e}")
+            return
+        if "Mid_time" not in master.columns:
+            messagebox.showerror("Calcul O-C", "Le CSV Tc doit contenir la colonne Mid_time.")
+            return
+        master = master.replace([np.inf, -np.inf], np.nan)
+        master["Mid_time"] = pd.to_numeric(master.get("Mid_time"), errors="coerce")
+        master = master.dropna(subset=["Mid_time"]).sort_values("Mid_time").reset_index(drop=True)
+        if len(master) < 2:
+            messagebox.showerror("Calcul O-C", "Pas assez de mid-times valides.")
+            return
+
+        p_ref = simpledialog.askfloat(
+            "Période de référence",
+            "Période orbitale (jours) pour calcul O-C :",
+            initialvalue=float(self.seq_period_ref) if self.seq_period_ref else 1.30619,
+            minvalue=1e-6,
+        )
+        if p_ref is None or not np.isfinite(p_ref) or p_ref <= 0:
+            return
+        t0_ref = float(master["Mid_time"].iloc[0])
+
+        if "Epoch_File" in master.columns:
+            ef = pd.to_numeric(master["Epoch_File"], errors="coerce")
+            has_epoch_file = np.isfinite(ef)
+        else:
+            ef = pd.Series(np.nan, index=master.index, dtype=float)
+            has_epoch_file = np.zeros(len(master), dtype=bool)
+        epochs_calc = np.rint((master["Mid_time"].values.astype(float) - t0_ref) / float(p_ref)).astype(int)
+        epochs = np.where(has_epoch_file.values if hasattr(has_epoch_file, "values") else has_epoch_file, ef.values.astype(int), epochs_calc)
+        tc_linear = t0_ref + epochs * float(p_ref)
+        oc_minutes = (master["Mid_time"].values.astype(float) - tc_linear) * MINUTES_PER_DAY
+
+        master["Epoch"] = epochs
+        master["O-C_minutes"] = oc_minutes
+        if "Uncertainty" not in master.columns:
+            master["Uncertainty"] = 0.0
+        master["P_ref_days"] = float(p_ref)
+        master["T0_ref"] = t0_ref
+        pref = [
+            "Epoch", "Mid_time", "O-C_minutes", "Uncertainty", "Depth", "Period",
+            "Epoch_File", "Date_File", "Source_File", "Review_Order", "P_ref_days", "T0_ref",
+        ]
+        out_cols = [c for c in pref if c in master.columns] + [c for c in master.columns if c not in pref]
+        master = master[out_cols]
+        out_path = os.path.join(os.path.dirname(os.path.abspath(path)), "mid_times_master.csv")
+        master.to_csv(out_path, index=False)
+        messagebox.showinfo("Calcul O-C", f"Master créé :\n{out_path}\nPoints: {len(master)}")
+        if messagebox.askyesno("Charger O-C", "Charger ce master dans l'onglet TTV ?"):
+            self.load_oc(out_path)
+
+    def _segment_lightcurve_by_gaps(self):
+        """Découpe la LC concaténée en segments temporels via un seuil de gap (jours)."""
+        if self.lc_time is None or self.lc_flux is None or len(self.lc_time) < 3:
+            messagebox.showwarning("Données", "Chargez d'abord une LC concaténée.")
+            return
+        t = np.asarray(self.lc_time, dtype=float)
+        f = np.asarray(self.lc_flux, dtype=float)
+        ok = np.isfinite(t) & np.isfinite(f)
+        t = t[ok]
+        f = f[ok]
+        if len(t) < 3:
+            messagebox.showerror("Segmentation", "LC invalide après nettoyage (NaN/Inf).")
+            return
+        order = np.argsort(t)
+        t = t[order]
+        f = f[order]
+        dt = np.diff(t)
+        dt = dt[np.isfinite(dt) & (dt > 0)]
+        if len(dt) == 0:
+            messagebox.showerror("Segmentation", "Impossible d'estimer les gaps temporels.")
+            return
+        max_gap = float(np.max(dt))
+        p95 = float(np.percentile(dt, 95))
+        # Seuil auto robuste: grand devant la cadence intra-session, mais bien inférieur aux gaps saisonniers.
+        auto_gap = max(2.0, min(60.0, p95 * 20.0))
+        if max_gap >= 30.0:
+            auto_gap = max(auto_gap, 15.0)
+        gap_days = simpledialog.askfloat(
+            "Segmentation temporelle",
+            (
+                "Seuil de gap (jours) pour créer un nouveau segment :\n"
+                f"- gap max détecté: {max_gap:.2f} j\n"
+                f"- gap auto suggéré: {auto_gap:.2f} j"
+            ),
+            initialvalue=float(auto_gap),
+            minvalue=0.01,
+        )
+        if gap_days is None:
+            return
+        cuts = np.where(dt > float(gap_days))[0]
+        starts = np.concatenate(([0], cuts + 1))
+        ends = np.concatenate((cuts + 1, [len(t)]))
+        segments = []
+        for i, (s, e) in enumerate(zip(starts, ends), start=1):
+            ts = t[s:e]
+            fs = f[s:e]
+            if len(ts) < 10:
+                continue
+            segments.append(
+                {
+                    "id": i,
+                    "time": ts,
+                    "flux": fs,
+                    "t_start": float(np.min(ts)),
+                    "t_end": float(np.max(ts)),
+                    "best_period": None,
+                    "periods": None,
+                    "powers": None,
+                }
+            )
+        self.lc_segments = segments
+        if not segments:
+            messagebox.showwarning("Segmentation", "Aucun segment valide (>= 10 points) trouvé.")
+            return
+        spans = [f"S{i['id']}: {i['t_start']:.2f} -> {i['t_end']:.2f} ({len(i['time'])} pts)" for i in segments]
+        messagebox.showinfo(
+            "Segmentation OK",
+            f"{len(segments)} segment(s) créé(s) avec gap>{gap_days:.2f} j.\n\n" + "\n".join(spans[:12]),
+        )
+
+    def _run_bls_sequential(self):
+        """Exécute BLS segment par segment (workflow TTV sur longues baselines)."""
+        if not self.lc_segments:
+            messagebox.showwarning("Segments", "Commencez par segmenter la LC (bouton 1).")
+            return
+        pr = self._get_period_search_range()
+        if pr is None:
+            return
+        min_p, max_p = pr
+        bls_detrend = bool(self._bls_detrend_var.get())
+        try:
+            bls_deg = int(self._bls_detrend_deg_var.get())
+        except (TypeError, ValueError):
+            bls_deg = 2
+        bls_deg = max(1, min(5, bls_deg))
+        failed = 0
+        lines = []
+        for seg in self.lc_segments:
+            try:
+                periods, powers, best = run_bls(
+                    seg["time"],
+                    seg["flux"],
+                    min_period=min_p,
+                    max_period=max_p,
+                    detrend=bls_detrend,
+                    detrend_degree=bls_deg,
+                )
+                seg["periods"] = periods
+                seg["powers"] = powers
+                seg["best_period"] = float(best) if np.isfinite(best) else None
+                if seg["best_period"] is not None:
+                    lines.append(f"S{seg['id']}: P={seg['best_period']:.6f} j")
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        if failed == len(self.lc_segments):
+            messagebox.showerror("BLS séquentiel", "Échec du BLS sur tous les segments.")
+            return
+        message = f"BLS terminé sur {len(self.lc_segments) - failed}/{len(self.lc_segments)} segments.\n\n"
+        if lines:
+            message += "\n".join(lines[:20])
+        messagebox.showinfo("BLS séquentiel", message)
+
+    def _open_segment_markers_viewer(self):
+        """Ouvre un segment pour validation locale des transits et export CSV segmenté."""
+        if not self.lc_segments:
+            messagebox.showwarning("Segments", "Aucun segment. Lancez d'abord la segmentation.")
+            return
+        seg_id = simpledialog.askinteger(
+            "Ouvrir segment",
+            f"ID segment à ouvrir (1..{len(self.lc_segments)}):",
+            minvalue=1,
+            maxvalue=len(self.lc_segments),
+            initialvalue=1,
+        )
+        if seg_id is None:
+            return
+        seg = next((s for s in self.lc_segments if int(s["id"]) == int(seg_id)), None)
+        if seg is None:
+            messagebox.showerror("Segment", "Segment introuvable.")
+            return
+        period = seg.get("best_period")
+        if period is None or not np.isfinite(period):
+            messagebox.showwarning(
+                "Segment",
+                "Ce segment n'a pas encore de période BLS valide.\nLancez d'abord « BLS séquentiel ».",
+            )
+            return
+        self.segment_output_dir = os.path.dirname(os.path.abspath(self.lc_selected_paths[0])) if self.lc_selected_paths else os.getcwd()
+        LCMarkersViewer(
+            self.main_frame.winfo_toplevel(),
+            seg["time"],
+            seg["flux"],
+            [float(period)],
+            filename_prefix=f"seg{int(seg['id']):03d}_",
+            extra_export_columns={
+                "Segment_ID": int(seg["id"]),
+                "Segment_Start": float(seg["t_start"]),
+                "Segment_End": float(seg["t_end"]),
+            },
+        )
+
+    def _merge_segment_midtimes_to_master(self):
+        """Fusionne les exports segmentés mid-time_*.csv en un master prêt pour O-C/TTV."""
+        folder = filedialog.askdirectory(title="Dossier contenant les exports segmentés mid-time_*.csv")
+        if not folder:
+            return
+        pattern = os.path.join(folder, "mid-time_seg*_P*.csv")
+        files = sorted(glob.glob(pattern))
+        if not files:
+            messagebox.showwarning("Fusion", "Aucun fichier segmenté trouvé (attendu: mid-time_seg*_P*.csv).")
+            return
+        frames = []
+        for fp in files:
+            try:
+                df = pd.read_csv(fp)
+                if "Mid_time" not in df.columns:
+                    continue
+                if "Period" not in df.columns:
+                    df["Period"] = np.nan
+                frames.append(df)
+            except Exception as e:
+                logger.warning("Fusion mid-time: fichier ignoré %s (%s)", fp, e)
+        if not frames:
+            messagebox.showerror("Fusion", "Aucun CSV exploitable.")
+            return
+        master = pd.concat(frames, ignore_index=True)
+        master = master.replace([np.inf, -np.inf], np.nan)
+        master = master.dropna(subset=["Mid_time"])
+        master["Mid_time"] = pd.to_numeric(master["Mid_time"], errors="coerce")
+        master = master.dropna(subset=["Mid_time"]).sort_values("Mid_time").reset_index(drop=True)
+        if len(master) < 2:
+            messagebox.showerror("Fusion", "Pas assez de points Mid_time pour construire un master.")
+            return
+
+        period_guess = float(np.nanmedian(pd.to_numeric(master["Period"], errors="coerce")))
+        if not np.isfinite(period_guess) or period_guess <= 0:
+            period_guess = None
+        p_ref = simpledialog.askfloat(
+            "Période de référence",
+            "Période orbitale de référence (jours) pour Epoch/O-C master :",
+            initialvalue=period_guess if period_guess else 1.0,
+            minvalue=1e-6,
+        )
+        if p_ref is None or not np.isfinite(p_ref) or p_ref <= 0:
+            return
+        t0_ref = float(master["Mid_time"].iloc[0])
+        epochs = np.rint((master["Mid_time"].values.astype(float) - t0_ref) / float(p_ref)).astype(int)
+        tc_linear = t0_ref + epochs * float(p_ref)
+        oc_minutes = (master["Mid_time"].values.astype(float) - tc_linear) * MINUTES_PER_DAY
+
+        master["Epoch"] = epochs
+        master["O-C_minutes"] = oc_minutes
+        if "Uncertainty" not in master.columns:
+            master["Uncertainty"] = 0.0
+        master["P_ref_days"] = float(p_ref)
+        master["T0_ref"] = t0_ref
+
+        preferred = [
+            "Epoch", "Mid_time", "O-C_minutes", "Uncertainty", "Depth", "Period",
+            "Segment_ID", "Segment_Start", "Segment_End", "P_ref_days", "T0_ref",
+        ]
+        out_cols = [c for c in preferred if c in master.columns] + [c for c in master.columns if c not in preferred]
+        master = master[out_cols]
+
+        out_path = os.path.join(folder, "mid_times_master.csv")
+        master.to_csv(out_path, index=False)
+        self.oc_source_path = out_path
+        messagebox.showinfo(
+            "Fusion terminée",
+            f"Master créé :\n{out_path}\n\nPoints: {len(master)}\nP_ref={p_ref:.6f} j\nT0_ref={t0_ref:.6f}",
+        )
+        if messagebox.askyesno("Charger O-C", "Charger immédiatement ce master dans l'onglet TTV ?"):
+            self.load_oc(out_path)
+
     def load_lightcurve(self):
         """
         Charge une courbe de lumière (LC) à partir des fichiers listés au bloc 1.
@@ -402,6 +934,13 @@ class DataAnalysisTab:
             messagebox.showerror("Erreur", "Vérifiez les valeurs Min/Max Période.")
             return
 
+        bls_detrend = bool(self._bls_detrend_var.get())
+        try:
+            bls_deg = int(self._bls_detrend_deg_var.get())
+        except (TypeError, ValueError):
+            bls_deg = 2
+        bls_deg = max(1, min(5, bls_deg))
+
         # 1. SIGNAL DE TRAVAIL EN COURS (S'exécute AVANT que le thread ne bloque la GUI)
         self.main_frame.config(cursor="watch")
         self.sub_notebook.config(cursor="watch") 
@@ -409,12 +948,12 @@ class DataAnalysisTab:
 
         # 2. Lancement du calcul dans un thread
         thread = threading.Thread(
-            target=self._worker_run_period_algo, 
-            args=(algo, min_p, max_p)
+            target=self._worker_run_period_algo,
+            args=(algo, min_p, max_p, bls_detrend, bls_deg),
         )
         thread.start()
 
-    def _worker_run_period_algo(self, algo, min_p, max_p):
+    def _worker_run_period_algo(self, algo, min_p, max_p, bls_detrend=False, bls_deg=2):
         """Fonction de travail exécutée dans le thread."""
         res = None
         name = "Calcul Périodogramme"
@@ -423,8 +962,17 @@ class DataAnalysisTab:
                 res = run_lomb_scargle(self.lc_time, self.lc_flux, min_period=min_p, max_period=max_p)
                 name = "Lomb-Scargle (Standard Norm)"
             elif algo == "BLS":
-                res = run_bls(self.lc_time, self.lc_flux, min_period=min_p, max_period=max_p)
+                res = run_bls(
+                    self.lc_time,
+                    self.lc_flux,
+                    min_period=min_p,
+                    max_period=max_p,
+                    detrend=bls_detrend,
+                    detrend_degree=bls_deg,
+                )
                 name = "Box Least Squares (Transit)"
+                if bls_detrend:
+                    name = f"{name}, détrend poly °{bls_deg}"
             elif algo == "PLAV":
                 res = run_plavchan(self.lc_time, self.lc_flux, min_period=min_p, max_period=max_p)
                 name = "Plavchan (Binless PDM)"
@@ -469,8 +1017,45 @@ class DataAnalysisTab:
     # PARTIE B : ANALYSE TTV (MID-TIME + O-C)
     # =========================================================================
     def setup_part_b(self):
-        # 1. FLUX DE TRAVAIL TTV
-        ctrl_frame = ttk.LabelFrame(self.tab_ttv, text="Flux de travail : Analyse TTV (O-C)", padding=10)
+        # 1) Reprise des fichiers source (même liste que l'onglet période)
+        src_frame = ttk.LabelFrame(self.tab_ttv, text="1. Fichiers source (repris de l'onglet Détermination de la période)", padding=8)
+        src_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(6, 4))
+        src_list_fr = ttk.Frame(src_frame)
+        src_list_fr.pack(fill=tk.BOTH, expand=True)
+        src_sb = ttk.Scrollbar(src_list_fr)
+        self._ttv_lc_listbox = tk.Listbox(
+            src_list_fr,
+            height=4,
+            width=92,
+            yscrollcommand=src_sb.set,
+            font=("Consolas", 9),
+            selectmode=tk.EXTENDED,
+        )
+        src_sb.config(command=self._ttv_lc_listbox.yview)
+        self._ttv_lc_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        src_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        src_btn_fr = ttk.Frame(src_frame)
+        src_btn_fr.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(
+            src_btn_fr,
+            text="Transférer la liste depuis l'onglet périodogramme",
+            command=self._transfer_period_lc_list_to_ttv,
+        ).pack(side=tk.LEFT, padx=2)
+        self._refresh_lc_files_listbox()
+
+        # 2) Validation séquentielle des Tc
+        seq_frame = ttk.LabelFrame(self.tab_ttv, text="2. Validation séquentielle des Tc (LC par LC)", padding=10)
+        seq_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=4)
+        self._seq_auto_next_var = tk.BooleanVar(value=True)
+        ttk.Button(seq_frame, text="Ouvrir LC", command=self._restart_epoch_review).pack(side=tk.LEFT, padx=4)
+        ttk.Button(seq_frame, text="◀ Précédente", command=self._open_prev_epoch_review_item).pack(side=tk.LEFT, padx=4)
+        ttk.Button(seq_frame, text="Suivante ▶", command=self._open_next_epoch_review_item).pack(side=tk.LEFT, padx=4)
+        ttk.Button(seq_frame, text="Dernière ⏭", command=self._open_last_epoch_review_item).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(seq_frame, text="Auto: ouvrir la LC suivante après validation", variable=self._seq_auto_next_var).pack(side=tk.LEFT, padx=8)
+        ttk.Button(seq_frame, text="Calcul des O-C (CSV Tc -> master)", command=self._build_oc_from_sequential_tc).pack(side=tk.LEFT, padx=4)
+
+        # 3) O-C + fit TTV
+        ctrl_frame = ttk.LabelFrame(self.tab_ttv, text="3. Calcul O-C et modélisation TTV", padding=10)
         ctrl_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
 
         # A. Fréquences
@@ -484,14 +1069,14 @@ class DataAnalysisTab:
         
         # B. Boutons
         ttk.Separator(ctrl_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
-        ttk.Button(ctrl_frame, text="1. Charger O-C", command=self.load_oc).pack(side=tk.LEFT, padx=5)
+        ttk.Button(ctrl_frame, text="Charger O-C", command=self.load_oc).pack(side=tk.LEFT, padx=5)
         ttk.Button(ctrl_frame, text="🔍 Auto Période TTV", command=self.auto_find_period).pack(side=tk.LEFT, padx=5)
         ttk.Button(ctrl_frame, text="⚙️ Param. Fit", command=self.configure_fit_parameters).pack(side=tk.LEFT, padx=5)
-        ttk.Button(ctrl_frame, text="2. Fit Modèle", command=self.fit_ttv).pack(side=tk.LEFT, padx=5)
+        ttk.Button(ctrl_frame, text="Fit Modèle", command=self.fit_ttv).pack(side=tk.LEFT, padx=5)
         ttk.Button(ctrl_frame, text="📄 Rapport & Analyse", command=self.generate_report).pack(side=tk.LEFT, padx=5)
 
-        # 3. VIEWER
-        viewer_container = ttk.LabelFrame(self.tab_ttv, text="3. TTV Viewer", padding=5)
+        # 4) Viewer
+        viewer_container = ttk.LabelFrame(self.tab_ttv, text="4. TTV Viewer", padding=5)
         viewer_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         viewer_toolbar = tk.Frame(viewer_container)
@@ -499,11 +1084,18 @@ class DataAnalysisTab:
         
         self.ttv_viewer = TTVViewer(viewer_container)
         ttk.Button(viewer_toolbar, text="Sauvegarder Figure", command=self.save_plot_with_table).pack(side=tk.LEFT)
+        ttk.Button(viewer_toolbar, text="Effacer figure", command=self._clear_ttv_figure).pack(side=tk.LEFT, padx=6)
 
     # --- MÉTHODES BACKEND PARTIE B ---
-    def load_oc(self):
-        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
-        if not path: return
+    def _clear_ttv_figure(self):
+        """Efface uniquement la figure TTV affichée (sans toucher aux CSV)."""
+        if self.ttv_viewer and hasattr(self.ttv_viewer, "clear_plot"):
+            self.ttv_viewer.clear_plot()
+
+    def load_oc(self, file_path=None):
+        path = file_path or filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
         try:
             df = pd.read_csv(path)
             df.columns = [str(c).replace('\ufeff', '').strip().lower().lstrip('#') for c in df.columns]
@@ -1091,8 +1683,9 @@ INTERPRÉTATION : {interpretation}
 4. VÉRIFICATION PHYSIQUE ('The Exoplanet Edge' - Yahalomi et al.)
 -------------------------------------------------------------------
 Période Orbitale Planète : {p_orb_jours:.4f} jours
-Période Modulation TTV   : {p_ttv_jours_moy:.4f} jours ({ratio_p_ttv_p_orb:.4f} x P_orb)
-Ratio (P_ttv / P_orb)    : {ratio_p_ttv_p_orb:.4f}
+P_ttv (en époques)       : {p_ttv_epoch_moy:.4f} +/- {p_ttv_epoch_err:.4f}
+Période Modulation TTV   : {p_ttv_jours_moy:.4f} +/- {p_ttv_jours_err:.4f} jours
+Ratio (P_ttv / P_orb)    : {ratio_p_ttv_p_orb:.4f} (sans unité)
 Limite Théorique         : > 0.5
 
 [OK] COMPATIBLE AVEC UNE PERTURBATION PLANÉTAIRE
@@ -1428,7 +2021,7 @@ Note : Cherchez des transits ou des signaux TTV croisés à ces périodes.
         right_frame = ttk.Frame(main_paned, padding=10)
         main_paned.add(right_frame, weight=2)
         self.setup_nbody_visualization(right_frame)
-    
+
     def setup_nbody_controls(self, parent):
         """Crée l'interface de contrôle pour la simulation N-body."""
         # Instructions

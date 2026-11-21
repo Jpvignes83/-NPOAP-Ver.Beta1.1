@@ -35,6 +35,29 @@ class TTVViewer:
         self.data = None
         self.markers = []
 
+    def clear_plot(self):
+        """
+        Efface la figure (axes + tracés) sans supprimer les fichiers CSV.
+        Conserve les données en mémoire pour pouvoir retracer ensuite si besoin.
+        """
+        self.ax.clear()
+        self.ax_res.clear()
+        self.ax.axhline(y=0, color='#d62728', linestyle='--', linewidth=1.5, alpha=0.6)
+        self.ax.set_title("TTV Viewer (figure effacée)")
+        self.ax.set_xlabel("")
+        self.ax.set_ylabel("O-C (jours)")
+        self.ax.grid(True, linestyle='--', alpha=0.3)
+
+        self.ax_res.set_xlabel("Epoch")
+        self.ax_res.set_ylabel("Résidus (jours)")
+        self.ax_res.grid(True, linestyle='--', alpha=0.3)
+        self.ax_res.text(
+            0.5, 0.5, "Figure effacée",
+            transform=self.ax_res.transAxes,
+            ha='center', va='center', style='italic', color='gray'
+        )
+        self.canvas.draw()
+
     # --- Méthodes de l'interface graphique ---
     
     def load_csv(self, file_path=None): # Rendre la méthode plus flexible

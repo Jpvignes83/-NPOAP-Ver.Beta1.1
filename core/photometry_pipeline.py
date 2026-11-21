@@ -66,13 +66,21 @@ def airmass(ra, dec, obstime):
 
 def compute_zero_point(matched_table, airmass):
     try:
+        from config import get_extinction_k, refresh_onsky_from_config_json
+
+        refresh_onsky_from_config_json()
+        k = get_extinction_k()
+        if k is None:
+            k = 0.1  # repli historique NPOAP si aucune mesure SHOBS on-sky
         zp_vals = matched_table['phot_g_mean_mag'] - matched_table['instrumental_mag']
         zp_clipped = sigma_clip(zp_vals, sigma=3, cenfunc='median')
         zp_median = np.median(zp_clipped)
-        zp_corrected = zp_median + 0.1 * airmass
+        zp_corrected = zp_median + float(k) * airmass
         zp_std = np.std(zp_clipped)
         return zp_corrected, zp_std
-    except: return None, None
+    except (KeyError, ValueError, Exception) as e:
+        logger.warning(f"Erreur zero-point: {e}")
+        return None, None
 
 def match_sources_with_gaia(phot_df, search_radius_arcsec=2.0, gaia_mag_column="phot_g_mean_mag"):
     if not {"ra", "dec"}.issubset(phot_df.columns): return phot_df
@@ -87,7 +95,9 @@ def match_sources_with_gaia(phot_df, search_radius_arcsec=2.0, gaia_mag_column="
                 results.append({"ra_gaia": best["ra"], "dec_gaia": best["dec"], 
                                 gaia_mag_column: best[gaia_mag_column], "source_id": best["source_id"]})
             else: results.append({"ra_gaia": np.nan, "dec_gaia": np.nan, gaia_mag_column: np.nan, "source_id": None})
-        except: results.append({"ra_gaia": np.nan, "dec_gaia": np.nan, gaia_mag_column: np.nan, "source_id": None})
+        except Exception as e:
+            logger.debug(f"Gaia match failed: {e}")
+            results.append({"ra_gaia": np.nan, "dec_gaia": np.nan, gaia_mag_column: np.nan, "source_id": None})
     return pd.concat([phot_df.reset_index(drop=True), pd.DataFrame(results)], axis=1)
 
 def two_d_gaussian(x_array, y_array, model_norm, model_floor, model_x_mean, model_y_mean, model_x_sigma, model_y_sigma, model_theta):
@@ -447,56 +457,117 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
     canvas_mpl.mpl_connect('motion_notify_event', update_cursor)
 
     stars_data = []
-    
+
+    def _format_aperture_field(val):
+        if val is None or (isinstance(val, float) and not np.isfinite(val)):
+            return "8.0"
+        x = float(val)
+        s = f"{x:.3f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+
+    def _parse_aperture_field(svar):
+        try:
+            return float(str(svar.get()).strip().replace(",", "."))
+        except (TypeError, ValueError):
+            return None
+
     def update_aperture_visibility(aperture_data):
         state = aperture_data['active'].get()
         for p in aperture_data['patches']:
             p.set_visible(state)
-        canvas_mpl.draw_idle() 
-        
+        canvas_mpl.draw_idle()
+
     def add_ui(label, x, y, ra, ri, ro, color, coord):
-        c_ap = Circle((x,y), ra, ec=color, ls='-', fill=False)
-        c_in = Circle((x,y), ri, ec=color, ls=':', fill=False)
-        c_out = Circle((x,y), ro, ec=color, ls=':', fill=False)
-        t_label = ax.text(x, y+15, label, color=color, fontweight='bold', ha='center')
-        ax.add_patch(c_ap); ax.add_patch(c_in); ax.add_patch(c_out)
-        
+        c_ap = Circle((x, y), ra, ec=color, ls="-", fill=False)
+        c_in = Circle((x, y), ri, ec=color, ls=":", fill=False)
+        c_out = Circle((x, y), ro, ec=color, ls=":", fill=False)
+        t_label = ax.text(x, y + 15, label, color=color, fontweight="bold", ha="center")
+        ax.add_patch(c_ap)
+        ax.add_patch(c_in)
+        ax.add_patch(c_out)
+
         row = tk.Frame(frame_inner, bg="#f0f0f0")
         row.pack(fill="x", pady=1)
-        act = tk.BooleanVar(value=True) 
-        vap, vin, vout = tk.DoubleVar(value=ra), tk.DoubleVar(value=ri), tk.DoubleVar(value=ro)
-        
+        act = tk.BooleanVar(value=True)
+        vap = tk.StringVar(value=_format_aperture_field(ra))
+        vin = tk.StringVar(value=_format_aperture_field(ri))
+        vout = tk.StringVar(value=_format_aperture_field(ro))
+
         star_entry = {
-            "label": label, "coord": coord, "x": x, "y": y, 
-            "vars": (vap, vin, vout), "active": act, "patches": (c_ap, c_in, c_out, t_label)
+            "label": label,
+            "coord": coord,
+            "x": x,
+            "y": y,
+            "vars": (vap, vin, vout),
+            "active": act,
+            "patches": (c_ap, c_in, c_out, t_label),
         }
         tk.Checkbutton(row, variable=act, bg="#f0f0f0").pack(side="left", padx=1)
         act.trace_add("write", lambda *a: update_aperture_visibility(star_entry))
-        lbl = tk.Label(row, text=label, fg=color, font=("Consolas",9,"bold"), width=5, bg="#f0f0f0", cursor="hand2")
+        lbl = tk.Label(
+            row,
+            text=label,
+            fg=color,
+            font=("Consolas", 9, "bold"),
+            width=5,
+            bg="#f0f0f0",
+            cursor="hand2",
+        )
         lbl.pack(side="left")
         tk.Label(row, text=f"{coord.ra.deg:.5f}", width=9, bg="#eef").pack(side="left", padx=1)
         tk.Label(row, text=f"{coord.dec.deg:.5f}", width=9, bg="#eef").pack(side="left", padx=1)
-        
-        def upd(*a): 
-            try: c_ap.set_radius(vap.get()); c_in.set_radius(vin.get()); c_out.set_radius(vout.get()); canvas_mpl.draw_idle()
-            except: pass
-            
-        for v in (vap, vin, vout): 
-            v.trace_add("write", upd)
-            tk.Entry(row, textvariable=v, width=4).pack(side="left", padx=1)
+
+        def refresh_circles(*_):
+            try:
+                a = _parse_aperture_field(vap)
+                b = _parse_aperture_field(vin)
+                c = _parse_aperture_field(vout)
+                if a is None or b is None or c is None:
+                    return
+                if not (a > 0 and b > a and c > b):
+                    return
+                c_ap.set_radius(a)
+                c_in.set_radius(b)
+                c_out.set_radius(c)
+                canvas_mpl.draw_idle()
+            except Exception:
+                pass
+
+        def on_entry_commit(event=None):
+            refresh_circles()
+
+        for sv in (vap, vin, vout):
+            ent = tk.Entry(row, textvariable=sv, width=7, justify="right", takefocus=True)
+            ent.pack(side="left", padx=1)
+            ent.bind("<FocusOut>", on_entry_commit)
+            ent.bind("<Return>", on_entry_commit)
+
         stars_data.append(star_entry)
-        lbl.bind("<Button-1>", lambda e: (ax.set_xlim(x-100, x+100), ax.set_ylim(y-100, y+100), canvas_mpl.draw_idle()))
-        
-        # Clic droit pour afficher les diagnostics FWHM/PSF (uniquement pour T1)
-        if label == 'T1':
+        lbl.bind(
+            "<Button-1>",
+            lambda e: (
+                ax.set_xlim(x - 100, x + 100),
+                ax.set_ylim(y - 100, y + 100),
+                canvas_mpl.draw_idle(),
+            ),
+        )
+
+        if label == "T1":
+
             def on_right_click(e):
                 fwhm_info = estimate_fwhm_marginal(data, x, y)
                 if fwhm_info and fwhm_info[0] is not None:
-                    # Récupérer les apertures actuelles
-                    r_ap_curr = vap.get()
-                    r_in_curr = vin.get()
-                    r_out_curr = vout.get()
-                    show_diagnostics_windows(data, x, y, fwhm_info, radii=(r_ap_curr, r_in_curr, r_out_curr))
+                    r_ap_curr = _parse_aperture_field(vap)
+                    r_in_curr = _parse_aperture_field(vin)
+                    r_out_curr = _parse_aperture_field(vout)
+                    if r_ap_curr is None or r_in_curr is None or r_out_curr is None:
+                        r_ap_curr = float(ra)
+                        r_in_curr = float(ri)
+                        r_out_curr = float(ro)
+                    show_diagnostics_windows(
+                        data, x, y, fwhm_info, radii=(r_ap_curr, r_in_curr, r_out_curr)
+                    )
+
             lbl.bind("<Button-3>", on_right_click)
 
     def process_coord(wx, wy, label, fwhm_override=None):
@@ -553,16 +624,37 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
     canvas_mpl.mpl_connect("button_press_event", on_click)
 
     def validate():
-        if not any(s['label'] == 'T1' for s in stars_data): return messagebox.showwarning("Erreur", "Pas de T1")
-        sels = []    
-        for s in stars_data:    
-            if s['active'].get(): 
-                sels.append({
-                    "label": s['label'], "coord": s['coord'], 
-                    "r_ap": s['vars'][0].get(), "r_in": s['vars'][1].get(), "r_out": s['vars'][2].get()
-                })    
-        root.destroy()    
-        if on_finish: on_finish(sels)
+        if not any(s["label"] == "T1" for s in stars_data):
+            return messagebox.showwarning("Erreur", "Pas de T1")
+        sels = []
+        for s in stars_data:
+            if not s["active"].get():
+                continue
+            ra = _parse_aperture_field(s["vars"][0])
+            ri = _parse_aperture_field(s["vars"][1])
+            ro = _parse_aperture_field(s["vars"][2])
+            if ra is None or ri is None or ro is None:
+                return messagebox.showwarning(
+                    "Rayons invalides",
+                    f"{s['label']} : saisissez des nombres valides pour Ap / In / Out.",
+                )
+            if not (ra > 0 and ri > ra and ro > ri):
+                return messagebox.showwarning(
+                    "Rayons incohérents",
+                    f"{s['label']} : il faut Ap > 0, In > Ap, Out > In (en pixels).",
+                )
+            sels.append(
+                {
+                    "label": s["label"],
+                    "coord": s["coord"],
+                    "r_ap": ra,
+                    "r_in": ri,
+                    "r_out": ro,
+                }
+            )
+        root.destroy()
+        if on_finish:
+            on_finish(sels)
 
     tk.Button(frame_bot, text="VALIDER & ANALYSER", bg="#ccffcc", font=("Arial",11,"bold"), command=validate).pack(side="left", padx=5, pady=5)
     
@@ -576,7 +668,9 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
             try:
                 cx, cy = wcs.world_to_pixel(cc)
                 if 0 <= cx < data.shape[1] and 0 <= cy < data.shape[0]: process_coord(cx, cy, f"C{i}")
-            except: pass
+            except Exception as e:
+                logger.debug(f"Coord conversion failed: {e}")
+                pass
     canvas_mpl.draw()
 
 # -------------------------------------------------------------------

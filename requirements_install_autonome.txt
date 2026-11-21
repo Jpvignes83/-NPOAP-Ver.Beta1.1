@@ -1,0 +1,50 @@
+# -*- coding: utf-8 -*-
+# NPOAP — Profil AUTONOME (cœur + optionnels PyPI)
+# Généré pour les distributions autonomes : un seul pip install -r
+# = requirements_install_core.txt ∪ requirements_install_optionnels.txt
+#
+# Exclut volontairement (install séparée / WSL) :
+#   ezpadova (git+), Prospector/FSPS, kbmod, CuPy, catalogues astrometry-data-*
+#
+# Usage (astroenv) :
+#   pip install -r requirements_install_autonome.txt
+
+# === CŒUR (requirements_install_core.txt) ===
+numpy>=2.4.0,<2.5
+scipy>=1.17.1,<1.18
+pandas>=1.5.0
+astropy>=7.2.0,<7.3
+photutils[all]>=1.6.0
+ccdproc>=2.4.0
+astroscrappy>=1.1.0
+astride>=0.3.1
+astroquery>=0.4.6
+reproject>=0.8
+matplotlib>=3.10.0,<3.11
+requests>=2.33.0
+Pillow>=12.1.0
+pytz>=2024.1
+packaging>=21.0
+emcee>=3.1.0
+statsmodels>=0.13.0
+specutils>=1.12.0
+h5py>=3.0.0
+click>=8.0.0
+reportlab>=3.6.0
+pylightcurve>=4.0.0
+wotan>=1.9
+exotethys>=1.0.0
+exoclock
+sora-astro>=0.3.2
+
+# === OPTIONNELS (requirements_install_optionnels.txt) ===
+phoebe>=2.4.22,<2.5
+rebound>=4.0
+ultranest>=4.0
+batman-package>=2.4.9
+sncosmo>=2.10,<3
+iminuit>=2.0
+setuptools>=65,<81
+stdpipe
+scikit-learn
+celerite2

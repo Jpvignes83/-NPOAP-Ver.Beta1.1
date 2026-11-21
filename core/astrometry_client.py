@@ -34,7 +34,7 @@ import json
 def json2python(data):
     try:
         return json.loads(data)
-    except:
+    except Exception:
         pass
     return None
 python2json = json.dumps
@@ -282,7 +282,7 @@ class ClientRunnerOptions(object):
     def __getattr__(self, name):
         try:
             return object.__getattr__(self, name)
-        except:
+        except Exception:
             return None
 
 def run_client(opt):
@@ -464,55 +464,24 @@ def get_args():
     parser.add_option('--image-width', type=int, help='Set image width for x,y lists')
     parser.add_option('--image-height', type=int, help='Set image height for x,y lists')
     parser.add_option('--album', type=str, help='Add image to album with given title string')
-    parser.add_option('--sdss', dest='sdss_wcs', nargs=2, help='Plot SDSS image for the given WCS file; write plot to given PNG filename')
-    parser.add_option('--galex', dest='galex_wcs', nargs=2, help='Plot GALEX image for the given WCS file; write plot to given PNG filename')
-    parser.add_option('--jobid', '-i', dest='solved_id', type=int,help='retrieve result for jobId instead of submitting new image')
-    parser.add_option('--substatus', '-s', dest='sub_id', help='Get status of a submission')
-    parser.add_option('--jobstatus', '-j', dest='job_id', help='Get status of a job')
-    parser.add_option('--jobs', '-J', dest='myjobs', action='store_true', help='Get all my jobs')
-    parser.add_option('--jobsbyexacttag', '-T', dest='jobs_by_exact_tag', help='Get a list of jobs associated with a given tag--exact match')
-    parser.add_option('--jobsbytag', '-t', dest='jobs_by_tag', help='Get a list of jobs associated with a given tag')
-    parser.add_option( '--private', '-p',
-        dest='public',
-        action='store_const',
-        const='n',
-        default='y',
-        help='Hide this submission from other users')
-    parser.add_option('--allow_mod_sa','-m',
-        dest='allow_mod',
-        action='store_const',
-        const='sa',
-        default='d',
-        help='Select license to allow derivative works of submission, but only if shared under same conditions of original license')
-    parser.add_option('--no_mod','-M',
-        dest='allow_mod',
-        action='store_const',
-        const='n',
-        default='d',
-        help='Select license to disallow derivative works of submission')
-    parser.add_option('--no_commercial','-c',
-        dest='allow_commercial',
-        action='store_const',
-        const='n',
-        default='d',
-        help='Select license to disallow commercial use of submission')
+    parser.add_option('--sdss', dest='sdss_wcs', nargs=2, help='Plot SDSS image for the given WCS file (args: wcs.fits out.jpg)')
+    parser.add_option('--galex', dest='galex_wcs', nargs=2, help='Plot GALEX image for the given WCS file (args: wcs.fits out.jpg)')
+    parser.add_option('--jobs-by-tag', dest='jobs_by_tag', help='Get a list of job ids with the given tag')
+    parser.add_option('--jobs-by-exact-tag', dest='jobs_by_exact_tag', help='Get a list of job ids with the given exact tag')
+    parser.add_option('--myjobs', dest='myjobs', action='store_true', help='Get a list of my job ids')
+    parser.add_option('--subid', dest='sub_id', type=int, help='Submission id')
+    parser.add_option('--jobid', dest='job_id', type=int, help='Job id')
+    parser.add_option('--solved-id', dest='solved_id', type=int, help='Solved job id')
 
-    opt,args = parser.parse_args()
-
-    if opt.apikey is None:
-        # try the environment
-        opt.apikey = os.environ.get('AN_API_KEY', None)
-    if opt.apikey is None:
-        parser.print_help()
-        print()
-        print('You must either specify --apikey or set AN_API_KEY')
-        sys.exit(-1)
-
+    opt, args = parser.parse_args()
     return opt
 
 if __name__ == '__main__':
-    print("Running with args %s"%sys.argv)
-
     opt = get_args()
-
+    if not opt.apikey:
+        import os
+        opt.apikey = os.environ.get('AN_API_KEY')
+    if not opt.apikey:
+        print('You must supply an API key with --apikey or set the AN_API_KEY environment variable')
+        sys.exit(-1)
     run_client(opt)

@@ -4,7 +4,6 @@ import tkinter as tk
 from tkinter import ttk
 
 from gui.home_tab import HomeTab
-from gui.planetarium_tab import PlanetariumTab
 try:
     from gui.night_observation_tab import NightObservationTab
     NIGHT_OBS_AVAILABLE = True
@@ -12,11 +11,17 @@ except ImportError as e:
     NIGHT_OBS_AVAILABLE = False
     NightObservationTab = None
     print(f"Warning: NightObservationTab non disponible: {e}")
+try:
+    from gui.nina_control_tab import NinaControlTab
+    NINA_CONTROL_AVAILABLE = True
+except ImportError as e:
+    NINA_CONTROL_AVAILABLE = False
+    NinaControlTab = None
+    print(f"Warning: NinaControlTab non disponible: {e}")
 from gui.data_reduction_tab import CCDProcGUI
 from gui.photometry_exoplanets_tab import PhotometryExoplanetsTab
 from gui.asteroid_photometry_tab import AsteroidPhotometryTab
 from gui.transient_photometry_tab import TransientPhotometryTab
-from gui.data_analysis_tab import DataAnalysisTab
 from gui.binary_stars_tab import BinaryStarsTab
 try:
     from gui.easy_lucky_imaging_tab import EasyLuckyImagingTab
@@ -25,7 +30,15 @@ except ImportError as e:
     EASY_LUCKY_AVAILABLE = False
     EasyLuckyImagingTab = None
     print(f"Warning: EasyLuckyImagingTab non disponible: {e}")
+try:
+    from gui.variable_stars_tab import VariableStarsTab
+    VARIABLE_STARS_AVAILABLE = True
+except ImportError as e:
+    VARIABLE_STARS_AVAILABLE = False
+    VariableStarsTab = None
+    print(f"Warning: VariableStarsTab non disponible: {e}")
 from gui.cluster_analysis_tab import ClusterAnalysisTab
+from gui.occultations_tab import OccultationsTab
 from gui.spectroscopy_tab import SpectroscopyTab
 try:
     from gui.catalogues_tab import CataloguesTab
@@ -40,15 +53,12 @@ class MainWindow:
     def __init__(self, root):
         self.root = root
         self.root.title("NPOAP")
-        self.root.geometry("1600x1000")
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        self._configure_window_for_screen(screen_w, screen_h)
 
-        # Configuration du style des onglets : police plus petite pour une meilleure lisibilité
-        style = ttk.Style()
-        style.configure(
-            "TNotebook.Tab",
-            font=("Arial", 8, "bold"),
-            padding=(10, 12),
-        )
+        # Configuration du style des onglets, adaptée à la résolution de l'écran.
+        self._configure_notebook_style_for_screen(screen_w, screen_h)
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -62,18 +72,41 @@ class MainWindow:
             self.night_observation_tab = NightObservationTab(self.notebook)
         else:
             self.night_observation_tab = None
+
+        if NINA_CONTROL_AVAILABLE and self.night_observation_tab is not None:
+            self.nina_control_tab = NinaControlTab(self.notebook, self.night_observation_tab)
+        else:
+            self.nina_control_tab = None
         
         self.data_reduction_tab = CCDProcGUI(self.notebook)
         self.photometry_exoplanets_tab = PhotometryExoplanetsTab(self.notebook, base_dir=None)
+        # Analyse des données : intégrée au panneau droit de Photométrie Exoplanètes
+        self.data_analysis_tab = getattr(
+            self.photometry_exoplanets_tab, "data_analysis_tab", None
+        )
         self.asteroid_photometry_tab = AsteroidPhotometryTab(self.notebook)
+        self.occultations_tab = OccultationsTab(
+            self.notebook,
+            night_observation_tab=self.night_observation_tab if NIGHT_OBS_AVAILABLE else None,
+        )
         self.transient_photometry_tab = TransientPhotometryTab(self.notebook)
-        self.data_analysis_tab = DataAnalysisTab(self.notebook)
-        self.binary_stars_tab = BinaryStarsTab(self.notebook)
-        self.planetarium_tab = PlanetariumTab(self.notebook)
+
+        # Onglet « Étoiles » : binaires, Easy Lucky Imaging, étoiles variables
+        self.stars_container = ttk.Frame(self.notebook)
+        self.stars_notebook = ttk.Notebook(self.stars_container)
+        self.stars_notebook.pack(fill=tk.BOTH, expand=True)
+        self.binary_stars_tab = BinaryStarsTab(self.stars_notebook)
+        self.stars_notebook.add(self.binary_stars_tab, text="⭐ Étoiles Binaires")
         if EASY_LUCKY_AVAILABLE:
-            self.easy_lucky_imaging_tab = EasyLuckyImagingTab(self.notebook)
+            self.easy_lucky_imaging_tab = EasyLuckyImagingTab(self.stars_notebook)
+            self.stars_notebook.add(self.easy_lucky_imaging_tab, text="✨ Easy Lucky Imaging")
         else:
             self.easy_lucky_imaging_tab = None
+        if VARIABLE_STARS_AVAILABLE:
+            self.variable_stars_tab = VariableStarsTab(self.stars_notebook)
+            self.stars_notebook.add(self.variable_stars_tab, text="🌟 Étoiles Variables")
+        else:
+            self.variable_stars_tab = None
         self.cluster_analysis_tab = ClusterAnalysisTab(self.notebook)
         self.spectroscopy_tab = SpectroscopyTab(self.notebook)
         if CATALOGUES_AVAILABLE:
@@ -87,23 +120,15 @@ class MainWindow:
 
         self.notebook.add(self.home_tab, text="🏠 Accueil")
         if self.night_observation_tab is not None:
-            # Lien NightObservationTab → PlanetariumTab (C2A)
-            try:
-                self.night_observation_tab.set_c2a_visualizer(self.planetarium_tab.update_targets_from_night_tab)
-            except Exception:
-                pass
             self.notebook.add(self.night_observation_tab, text="🌙 Observation de la Nuit")
-        # Onglet Planétarium immédiatement après « Observation de la Nuit »
-        self.notebook.add(self.planetarium_tab, text="🪐 Planétarium (C2A)")
-        # Puis réduction et le reste de la chaîne
+        if self.nina_control_tab is not None:
+            self.notebook.add(self.nina_control_tab, text="🔭 Contrôle NINA")
         self.notebook.add(self.data_reduction_tab.frame, text="🛠️ Réduction de Données")
         self.notebook.add(self.photometry_exoplanets_tab, text="🔭 Photométrie Exoplanètes")
         self.notebook.add(self.asteroid_photometry_tab.frame, text="🛰️ Photométrie Astéroïdes")
+        self.notebook.add(self.occultations_tab, text="🌑 Occultation")
         self.notebook.add(self.transient_photometry_tab, text="💥 Photométrie Transitoires")
-        self.notebook.add(self.data_analysis_tab.main_frame, text="📈 Analyse des Données")
-        self.notebook.add(self.binary_stars_tab, text="⭐ Étoiles Binaires")
-        if self.easy_lucky_imaging_tab is not None:
-            self.notebook.add(self.easy_lucky_imaging_tab, text="✨ Easy Lucky Imaging")
+        self.notebook.add(self.stars_container, text="⭐ Etoiles")
         self.notebook.add(self.cluster_analysis_tab, text="📊 Analyse d'amas")
         self.notebook.add(self.spectroscopy_tab, text="🔬 Spectroscopie")
         if self.catalogues_tab is not None:
@@ -111,6 +136,41 @@ class MainWindow:
 
         # Gestion fermeture propre
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
+
+    def _configure_window_for_screen(self, screen_w: int, screen_h: int) -> None:
+        """Adapte la taille de la fenêtre à la résolution utilisateur."""
+        is_small_screen = screen_w <= 1366 or screen_h <= 768
+        if is_small_screen:
+            # Sur petits écrans, maximiser évite que des zones basses soient cachées.
+            try:
+                self.root.state("zoomed")
+            except tk.TclError:
+                self.root.geometry(f"{screen_w}x{screen_h}+0+0")
+        else:
+            target_w = min(1920, max(1280, int(screen_w * 0.96)))
+            target_h = min(1200, max(800, int(screen_h * 0.92)))
+            pos_x = max(0, (screen_w - target_w) // 2)
+            pos_y = max(0, (screen_h - target_h) // 2)
+            self.root.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+
+        min_w = min(1280, max(960, int(screen_w * 0.70)))
+        min_h = min(900, max(640, int(screen_h * 0.70)))
+        self.root.minsize(min_w, min_h)
+
+    def _configure_notebook_style_for_screen(self, screen_w: int, screen_h: int) -> None:
+        """Réduit la taille des onglets pour les résolutions faibles."""
+        if screen_w <= 1366 or screen_h <= 768:
+            tab_font = ("Arial", 7, "bold")
+            tab_padding = (6, 8)
+        elif screen_w <= 1600 or screen_h <= 900:
+            tab_font = ("Arial", 8, "bold")
+            tab_padding = (8, 10)
+        else:
+            tab_font = ("Arial", 9, "bold")
+            tab_padding = (10, 12)
+
+        style = ttk.Style()
+        style.configure("TNotebook.Tab", font=tab_font, padding=tab_padding)
 
     def on_quit(self):
         self.root.destroy()

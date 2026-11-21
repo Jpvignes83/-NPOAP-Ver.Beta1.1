@@ -2,67 +2,44 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
+*.pyd
 .Python
-.venv/
-venv/
-ENV/
-.env
 *.egg-info/
 .eggs/
 dist/
-build/__pycache__/
 *.egg
 
-# Conda / caches
-.conda/
-.cache/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-htmlcov/
-.coverage
-coverage.xml
+# Environnements / IDE
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.cursor/
 
-# Journaux et sorties locales
+# Logs et sorties locales
 logs/
 *.log
 output/
-*.fits
-*.fit
+install_complet.log
+install_optionnels.log
 
-# Node (si présent à la racine)
-node_modules/
-
-# OS / IDE
-.DS_Store
-Thumbs.db
-desktop.ini
-.idea/
-*.swp
-*.swo
-
-# Fichiers temporaires / brouillons à la racine
-tmp_*.js
-tmp_*.html
-tmp_*.min.js
-
-# Archives, PDF et binaires lourds (GitHub / LFS si besoin)
-*.zip
-*.7z
-*.rar
-*.pdf
-build/distributions/
-# Build full locale (ex. C:\...\NPOAP\distributions\full) — ne pas mélanger avec le dépôt dev
-distributions/
-
-# Clés, caches locaux et config (ne jamais versionner)
-config.json
-priors_cache.json
-/pip
+# Secrets / clés locales
 .astrometry_api_key
 *.pem
-secrets.json
+secrets/
+credentials.json
 
-# Logs embarqués (tiers)
-external_apps/**/runtime_logs/
+# Caches / build locaux hors distribution
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# OneDrive / OS
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# Sorties build distribution (regenerables)
+build/distributions/
+

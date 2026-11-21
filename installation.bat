@@ -15,6 +15,8 @@ setlocal enabledelayedexpansion
 
 REM Toujours se placer dans le dossier du script ^(double-clic / start : evite xcopy depuis le mauvais repertoire^)
 cd /d "%~dp0"
+REM Chemin du .bat dans une variable : evite les bugs ^( "... (1) ..." ^) quand %%~dp0 est mis dans des blocs ^( ... ^).
+set "INSTALL_BAT_DIR=%~dp0"
 
 REM Pas de sequences ANSI : sortie texte brut uniquement (compatible toutes consoles)
 set "GREEN="
@@ -24,8 +26,7 @@ set "BLUE="
 set "RESET="
 
 REM Configuration
-set VERSION=1.0
-set PYTHON_VERSION=3.11.9
+set VERSION=1.1
 set MINICONDA_VERSION=latest
 set ENV_NAME=astroenv
 REM INSTALL_DIR : aucun chemin par defaut (chaque utilisateur choisit un dossier absolu)
@@ -43,12 +44,12 @@ REM ACCORD D'UTILISATION
 REM ===================================================================
 echo.
 echo ============================================================
-echo   Setup V1.0
+echo   Setup V1.1
 echo ============================================================
 echo.
 echo NPOAP Software Usage Agreement
 echo ----------------------------------------
-echo           (Rev.1.0)
+echo           (Rev.1.1)
 echo.
 echo As a user of the NPOAP software system (hereby referred to as "The System"^),
 echo I agree that:
@@ -105,6 +106,8 @@ echo %BLUE%=== ETAPE 1: Selection du dossier d'installation ===%RESET%
 echo.
 echo Indiquez un chemin absolu accessible en ecriture (ex. C:\Apps\NPOAP ou D:\Astro\NPOAP).
 echo Aucun dossier personnel n'est impose par defaut.
+echo Si les sources sont deja dans ce dossier ^(meme emplacement que installation.bat^), la copie sera
+echo automatiquement ignoree ^(sinon xcopy signale une "copie cyclique"^).
 echo.
 :ASK_INSTALL_DIR
 set "INSTALL_DIR_CUSTOM="
@@ -133,7 +136,7 @@ REM ===================================================================
 echo %BLUE%=== ETAPE 2: Verification de la configuration systeme ===%RESET%
 echo.
 
-REM MSVC, WSL, Ubuntu, Astrometry, KBMOD, CMake, Prospector : install_*.bat dans ce dossier
+REM MSVC, WSL, Ubuntu, Astrometry, KBMOD, CMake : install_*.bat ; Prospector WSL : Installation_fsps\prospector.bat manuel
 echo --- Controles generaux ---
 echo Verification de l'architecture...
 if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" (
@@ -159,68 +162,40 @@ if exist "%WRTEST%" (
 )
 echo.
 
-REM ===================================================================
-REM ETAPE 3: Installation de Python 3.11
-REM ===================================================================
-echo %BLUE%=== ETAPE 3: Installation de Python 3.11 ===%RESET%
+REM Journal unique : installation principale + suite optionnelle ^(install_optionnels.bat^)
+set "INSTALL_COMPLET_LOG=!INSTALL_DIR!\install_complet.log"
+(
+echo ============================================================
+echo NPOAP - Journal d'installation complet (install_complet.log^)
+echo Demarrage session: %date% %time%
+echo Dossier d'installation: !INSTALL_DIR!
+echo Environnement conda prevu: %ENV_NAME%
+echo Dossier du script installation.bat: !INSTALL_BAT_DIR!
 echo.
+echo Remarque : accord de licence, verification administrateur et saisie du dossier ^(etape 1^) ont precede ce fichier.
+echo ============================================================
+) > "!INSTALL_COMPLET_LOG!"
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 2: Verification de la configuration systeme ^(detail sur console^) ===
 
-python --version >nul 2>&1
-if %errorLevel% equ 0 (
-    for /f "tokens=2" %%i in ('python --version 2^>^&1') do set PYTHON_VER=%%i
-    echo Python est deja installe: !PYTHON_VER!
-    echo.
-    set /p REINSTALL_PYTHON="Voulez-vous reinstaller Python 3.11? (O/N): "
-    if /i "!REINSTALL_PYTHON!" neq "O" (
-        set SKIP_PYTHON=1
-    )
-)
-
-if not defined SKIP_PYTHON (
-    echo Telechargement de Python 3.11.9...
-    set PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/python-%PYTHON_VERSION%-amd64.exe
-    set PYTHON_INSTALLER=%TEMP%\python-%PYTHON_VERSION%-amd64.exe
-    
-    powershell -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%PYTHON_INSTALLER%'}"
-    
-    if exist "%PYTHON_INSTALLER%" (
-        echo Installation de Python 3.11.9 en cours...
-        echo %YELLOW%Ne fermez pas cette fenetre : installation silencieuse...%RESET%
-        REM Ne pas utiliser start /wait "chemin.exe" : le 1er guillemet est le TITRE, pas l'exe.
-        "%PYTHON_INSTALLER%" /quiet InstallAllUsers=1 PrependPath=1
-        if errorlevel 1 (
-            del "%PYTHON_INSTALLER%" >nul 2>&1
-            echo %RED%ERREUR: echec de l'installateur Python.%RESET%
-            pause
-            exit /b 1
-        )
-        del "%PYTHON_INSTALLER%" >nul 2>&1
-        
-        REM Attendre un peu et recharger PATH depuis le registre
-        timeout /t 3 /nobreak >nul
-        for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "PATH=%%B"
-        
-        python --version >nul 2>&1
-        if %errorLevel% equ 0 (
-            echo %GREEN%Python installe avec succes!%RESET%
-        ) else (
-            echo %YELLOW%ATTENTION: Python n'est pas encore dans le PATH%RESET%
-            echo Fermez et rouvrez ce terminal, puis relancez le script.
-            echo Ou continuez - Python sera disponible apres redemarrage du terminal.
-            set PYTHON_WARNING=1
-        )
-    ) else (
-        echo %RED%ERREUR: Echec du telechargement de Python%RESET%
-        pause
-        exit /b 1
-    )
-)
+REM ===================================================================
+REM ETAPE 3: Python (Miniconda + astroenv uniquement — pas d'installateur python.org)
+REM ===================================================================
+echo %BLUE%=== ETAPE 3: Python pour NPOAP ^(via Miniconda^) ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 3: Python pour NPOAP (via Miniconda^) ===
+echo.
+echo NPOAP s'execute dans l'environnement Conda "%ENV_NAME%" avec Python 3.11 ^(conda create^).
+echo Un installateur separe depuis python.org n'est plus necessaire : Miniconda fournit deja
+echo un interpreteur ^(base^) puis l'etape suivante cree %ENV_NAME% avec python=3.11.
+echo.
+echo Si vous souhaitez en plus un Python "systeme" hors Conda, installez-le manuellement depuis
+echo https://www.python.org/ ^(optionnel, non requis pour ce script^).
 echo.
 
 REM ===================================================================
 REM ETAPE 4: Installation de Miniconda
 REM ===================================================================
 echo %BLUE%=== ETAPE 4: Installation de Miniconda ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 4: Installation de Miniconda ===
 echo.
 
 REM Detection conda : d'abord conda.exe dans Scripts ; puis where ^(priorite aux lignes se terminant par conda.exe^)
@@ -289,7 +264,7 @@ if not defined SKIP_CONDA (
     echo Telechargement de Miniconda...
     set CONDA_URL=https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe
     set "CONDA_INSTALLER=%TEMP%\Miniconda3-latest-Windows-x86_64.exe"
-    if exist "%CONDA_INSTALLER%" del /f /q "%CONDA_INSTALLER%" >nul 2>&1
+    if exist "!CONDA_INSTALLER!" del /f /q "!CONDA_INSTALLER!" >nul 2>&1
     
     REM Plusieurs methodes : BITS (sortie native Windows^), PowerShell + console, curl
     set "DL_OK=0"
@@ -300,18 +275,18 @@ if not defined SKIP_CONDA (
     if !errorLevel! equ 0 (
         call set "BITSJOB=NPOAPmc%%RANDOM%%%%RANDOM%%"
         echo Methode A : BITS ^(bitsadmin^) - lignes de progression Windows...
-        bitsadmin /transfer !BITSJOB! /download /priority NORMAL "%CONDA_URL%" "%CONDA_INSTALLER%"
-        if !errorLevel! equ 0 if exist "%CONDA_INSTALLER%" set "DL_OK=1"
+        bitsadmin /transfer !BITSJOB! /download /priority NORMAL "!CONDA_URL!" "!CONDA_INSTALLER!"
+        if !errorLevel! equ 0 if exist "!CONDA_INSTALLER!" set "DL_OK=1"
     )
-    set "MCDLPS1=%~dp0installation_miniconda_download.ps1"
+    set "MCDLPS1=!INSTALL_BAT_DIR!installation_miniconda_download.ps1"
     if "!DL_OK!"=="0" if exist "!MCDLPS1!" (
         echo Methode B : PowerShell - barre ASCII + sortie rattachee a cette fenetre...
         if exist "!PSFULL!" (
-            "!PSFULL!" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "!MCDLPS1!" -Url "%CONDA_URL%" -Out "%CONDA_INSTALLER%"
+            "!PSFULL!" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "!MCDLPS1!" -Url "!CONDA_URL!" -Out "!CONDA_INSTALLER!"
         ) else (
-            powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "!MCDLPS1!" -Url "%CONDA_URL%" -Out "%CONDA_INSTALLER%"
+            powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "!MCDLPS1!" -Url "!CONDA_URL!" -Out "!CONDA_INSTALLER!"
         )
-        if !errorLevel! equ 0 if exist "%CONDA_INSTALLER%" set "DL_OK=1"
+        if !errorLevel! equ 0 if exist "!CONDA_INSTALLER!" set "DL_OK=1"
     )
     if "!DL_OK!"=="0" if not exist "!MCDLPS1!" (
         echo %YELLOW%installation_miniconda_download.ps1 absent du dossier du .bat - methodes A/C seulement.%RESET%
@@ -320,13 +295,13 @@ if not defined SKIP_CONDA (
         where curl >nul 2>&1
         if !errorLevel! equ 0 (
             echo Methode C : curl - barre sur stderr puis console...
-            curl.exe --progress-bar -fSL --retry 3 --connect-timeout 30 -o "%CONDA_INSTALLER%" "%CONDA_URL%"
-            if !errorLevel! equ 0 if exist "%CONDA_INSTALLER%" set "DL_OK=1"
+            curl.exe --progress-bar -fSL --retry 3 --connect-timeout 30 -o "!CONDA_INSTALLER!" "!CONDA_URL!"
+            if !errorLevel! equ 0 if exist "!CONDA_INSTALLER!" set "DL_OK=1"
         )
     )
-    if not exist "%CONDA_INSTALLER%" set "DL_OK=0"
+    if not exist "!CONDA_INSTALLER!" set "DL_OK=0"
     REM Eviter les echecs silencieux (page HTML, fichier vide ; Miniconda fait typiquement ~80 Mo)
-    if exist "%CONDA_INSTALLER%" for %%S in ("%CONDA_INSTALLER%") do (
+    if exist "!CONDA_INSTALLER!" for %%S in ("!CONDA_INSTALLER!") do (
         if %%~zS equ 0 set "DL_OK=0"
         if %%~zS LSS 5000000 (
             echo %RED%Le fichier telecharge est trop petit (%%~zS octets^) - echec probable du telechargement.%RESET%
@@ -334,23 +309,41 @@ if not defined SKIP_CONDA (
         )
     )
     if "!DL_OK!"=="0" (
-        if exist "%CONDA_INSTALLER%" del /f /q "%CONDA_INSTALLER%" >nul 2>&1
+        if exist "!CONDA_INSTALLER!" del /f /q "!CONDA_INSTALLER!" >nul 2>&1
         echo %RED%ERREUR: Echec du telechargement de Miniconda.%RESET%
         echo Verifiez la connexion Internet, le proxy, ou telechargez l'installateur a la main depuis:
-        echo   %CONDA_URL%
+        echo   !CONDA_URL!
         pause
         exit /b 1
     )
     
-    echo Installation de Miniconda en cours...
-    echo %YELLOW%Ne fermez pas cette fenetre : cela peut prendre plusieurs minutes.%RESET%
-    echo.
-    REM NSIS: l'option /D= doit etre en DERNIER. AllUsers -^> emplacement courant ProgramData.
-    "%CONDA_INSTALLER%" /InstallationType=AllUsers /RegisterPython=1 /AddToPath=1 /S /D=%ProgramData%\Miniconda3
-    
-    del /f /q "%CONDA_INSTALLER%" >nul 2>&1
-    
-    timeout /t 3 /nobreak >nul
+    set "NSIS_RAN=0"
+    set "NSIS_ERR=0"
+    set "OFFER_CONDA_BASE_UPDATE=0"
+    REM L'installateur NSIS AllUsers refuse un dossier deja rempli : eviter l'echec et le faux "succes".
+    if exist "%ProgramData%\Miniconda3\Scripts\conda.exe" (
+        set "OFFER_CONDA_BASE_UPDATE=1"
+        echo %YELLOW%Un Miniconda ^(tous utilisateurs^) est deja present :%RESET%
+        echo   %ProgramData%\Miniconda3
+        echo L'installateur silencieux ne peut pas reinstaller par-dessus ^(dossier non vide^).
+        echo Desinstallation complete ^(Applications Windows^) : seulement si vous voulez tout refaire a zero.
+        echo Sinon : apres l'etape des CGU des canaux, le script proposera une mise a jour de conda ^(environnement base^).
+        echo.
+        del /f /q "!CONDA_INSTALLER!" >nul 2>&1
+    ) else (
+        echo Installation de Miniconda en cours...
+        echo %YELLOW%Ne fermez pas cette fenetre : cela peut prendre plusieurs minutes.%RESET%
+        echo.
+        echo %GREEN%Note:%RESET% Avec /InstallationType=AllUsers, /AddToPath=1 est ignore ^(comportement Anaconda^).
+        echo.
+        REM NSIS: l'option /D= doit etre en DERNIER. AllUsers -^> emplacement courant ProgramData.
+        set "NSIS_RAN=1"
+        "!CONDA_INSTALLER!" /InstallationType=AllUsers /RegisterPython=1 /S /D=%ProgramData%\Miniconda3
+        set "NSIS_ERR=!errorLevel!"
+        del /f /q "!CONDA_INSTALLER!" >nul 2>&1
+        "%SystemRoot%\System32\timeout.exe" /t 3 /nobreak >nul
+    )
+    if "!NSIS_RAN!"=="1" if not "!NSIS_ERR!"=="0" if exist "%ProgramData%\Miniconda3\Scripts\conda.exe" set "OFFER_CONDA_BASE_UPDATE=1"
     for /f "tokens=2*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "PATH=%%B"
     
     set "CONDA_EXE_OK=0"
@@ -358,9 +351,22 @@ if not defined SKIP_CONDA (
     if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set "CONDA_EXE_OK=1"
     if "!CONDA_EXE_OK!"=="0" (
         echo %RED%ERREUR: Miniconda ne semble pas installe (conda.exe introuvable^).%RESET%
+        if "!NSIS_RAN!"=="1" if not "!NSIS_ERR!"=="0" (
+            echo L'installateur a peut-etre echoue ^(ex. ::error:: dossier non vide, droits^). Supprimez ou videz
+            echo manuellement %ProgramData%\Miniconda3 en administrateur si besoin, ou desinstallez l'ancienne Miniconda.
+        )
         echo Installez a la main en administrateur ou relancez le script.
         pause
         exit /b 1
+    )
+    if "!NSIS_RAN!"=="1" if not "!NSIS_ERR!"=="0" (
+        echo %YELLOW%ATTENTION: L'installateur Miniconda a signale un echec ^(code !NSIS_ERR!^).%RESET%
+        if exist "%ProgramData%\Miniconda3\Scripts\conda.exe" (
+            echo Une installation dans ProgramData est neanmoins detectee - le script continue avec celle-ci.
+        ) else if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" (
+            echo Conda est disponible depuis le profil utilisateur - le script continue.
+        )
+        echo.
     )
     
     if exist "%ProgramData%\Miniconda3\Scripts\conda.exe" set "PATH=%ProgramData%\Miniconda3;%ProgramData%\Miniconda3\Scripts;%ProgramData%\Miniconda3\Library\bin;%PATH%"
@@ -371,7 +377,14 @@ if not defined SKIP_CONDA (
     
     conda --version >nul 2>&1
     if !errorLevel! equ 0 (
-        echo %GREEN%Miniconda installe avec succes!%RESET%
+        if exist "%ProgramData%\Miniconda3\Scripts\conda.exe" if "!NSIS_RAN!"=="0" (
+            echo %GREEN%Conda : installation existante dans ProgramData conservee.%RESET%
+        ) else if "!NSIS_RAN!"=="1" if "!NSIS_ERR!"=="0" (
+            echo %GREEN%Miniconda installe avec succes!%RESET%
+        ) else (
+            echo %GREEN%Conda utilisable ^(version ci-dessous^).%RESET%
+        )
+        conda --version
     ) else (
         echo %YELLOW%ATTENTION: Conda n'est pas encore dans le PATH de cette session.%RESET%
         echo Reessayez: fermez cette fenetre puis relancez installation.bat.
@@ -397,12 +410,45 @@ if not defined CONDA_INST_ROOT (
     exit /b 1
 )
 
+REM Conda recent : sans acceptation explicite des CGU des canaux Anaconda par defaut,
+REM "conda create" en script echoue avec CondaToSNonInteractiveError.
+echo Acceptation des CGU des canaux repo.anaconda.com ^(obligatoire pour conda create en mode script^)...
+call conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>nul
+call conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>nul
+call conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/msys2 2>nul
+echo.
+
+REM Mise a jour de conda dans "base" sans reinstaller l'installateur .exe (dossier deja rempli, etc.)
+if "!OFFER_CONDA_BASE_UPDATE!"=="1" (
+    echo %BLUE%--- Mise a jour optionnelle : environnement de base Conda ---%RESET%
+    echo Met a jour l'outil %GREEN%conda%RESET% et les paquets du noyau ^(environnement %GREEN%base%RESET%^), sans reinstaller Miniconda.
+    set "DUCMD="
+    set /p DUCMD="Lancer : conda update -n base -c defaults conda -y ? (O/N) : "
+    if /i "!DUCMD!"=="O" (
+        echo.
+        "%CONDA_INST_ROOT%\Scripts\conda.exe" update -n base -c defaults conda -y
+        if !errorLevel! neq 0 (
+            echo %YELLOW%conda update a echoue. Essayez en administrateur, ou en ligne de commande :%RESET%
+            echo   call "%CONDA_INST_ROOT%\Scripts\activate.bat" base
+            echo   conda update -n base -c defaults conda
+        ) else (
+            echo %GREEN%Mise a jour de conda ^(base^) terminee.%RESET%
+        )
+        echo.
+    ) else (
+        echo Mise a jour de base ignoree. Pour la faire plus tard : conda activate base ^& conda update -n base -c defaults conda
+        echo.
+    )
+)
+
 REM ===================================================================
 REM ETAPE 5: Création de l'environnement Conda
 REM ===================================================================
 echo %BLUE%=== ETAPE 5: Creation de l'environnement Conda ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 5: Creation de l'environnement Conda ===
 echo.
 
+set "CONDA_FINAL_EC=0"
 conda env list | findstr /C:"%ENV_NAME%" >nul 2>&1
 if %errorLevel% equ 0 (
     echo L'environnement %ENV_NAME% existe deja.
@@ -410,32 +456,67 @@ if %errorLevel% equ 0 (
     set /p RECREATE_ENV="Voulez-vous le recreer? (O/N): "
     if /i "!RECREATE_ENV!"=="O" (
         echo Suppression de l'environnement existant...
-        call conda env remove -n %ENV_NAME% -y
+        call conda env remove -n %ENV_NAME% -y 1> "%TEMP%\npoap_conda_rm.log" 2>&1
+        type "%TEMP%\npoap_conda_rm.log"
+        type "%TEMP%\npoap_conda_rm.log" >> "!INSTALL_COMPLET_LOG!"
         echo Creation du nouvel environnement...
-        call conda create -n %ENV_NAME% python=3.11 -y
+        call conda create -n %ENV_NAME% python=3.11 -y 1> "%TEMP%\npoap_conda_cr.log" 2>&1
+        set "CONDA_FINAL_EC=!errorlevel!"
+        type "%TEMP%\npoap_conda_cr.log"
+        type "%TEMP%\npoap_conda_cr.log" >> "!INSTALL_COMPLET_LOG!"
     ) else (
         echo Utilisation de l'environnement existant.
     )
 ) else (
     echo Creation de l'environnement %ENV_NAME%...
-    call conda create -n %ENV_NAME% python=3.11 -y
+    call conda create -n %ENV_NAME% python=3.11 -y 1> "%TEMP%\npoap_conda_cr.log" 2>&1
+    set "CONDA_FINAL_EC=!errorlevel!"
+    type "%TEMP%\npoap_conda_cr.log"
+    type "%TEMP%\npoap_conda_cr.log" >> "!INSTALL_COMPLET_LOG!"
 )
 
-if %errorLevel% neq 0 (
+if !CONDA_FINAL_EC! neq 0 (
     echo %RED%ERREUR: Echec de la creation de l'environnement%RESET%
+    >>"!INSTALL_COMPLET_LOG!" echo ERREUR: conda environnement %ENV_NAME% ^(code !CONDA_FINAL_EC!^)
     pause
     exit /b 1
+)
+
+REM Miniconda AllUsers ^(ProgramData^) : sans ACE supplementaire, pip en session utilisateur
+REM refuse souvent l'ecriture dans Lib\site-packages ^(WinError 5 / Acces refuse^).
+REM On accorde au groupe BUILTIN\Users ^(SID fixe^) la modification avec heritage sur tout l'env conda.
+set "ASTRO_ENV_ROOT=!CONDA_INST_ROOT!\envs\%ENV_NAME%"
+if exist "!ASTRO_ENV_ROOT!" (
+    echo %BLUE%Droits d'ecriture sur l'environnement conda ^(pip, paquets utilisateur^)...%RESET%
+    icacls "!ASTRO_ENV_ROOT!" /grant "*S-1-5-32-545:(OI)(CI)M" /T >nul 2>&1
+    if !errorLevel! equ 0 (
+        echo %GREEN%OK : le groupe Utilisateurs peut modifier !ASTRO_ENV_ROOT! ^(pip sans administrateur^).%RESET%
+        >>"!INSTALL_COMPLET_LOG!" echo Droits pip: icacls Utilisateurs /M sur !ASTRO_ENV_ROOT!
+    ) else (
+        echo %YELLOW%ATTENTION: icacls a echoue - si pip indique "Acces refuse" sur site-packages, relancez en administrateur :%RESET%
+        echo   icacls "!ASTRO_ENV_ROOT!" /grant "*S-1-5-32-545:(OI)(CI)M" /T
+        >>"!INSTALL_COMPLET_LOG!" echo ATTENTION: icacls sur env conda a echoue ^(code !errorLevel!^)
+    )
 )
 
 echo %GREEN%Environnement %ENV_NAME% cree avec succes!%RESET%
 echo.
 
 REM ===================================================================
-REM ETAPE 6: Copie du projet, normalisation requirements.txt, dependances pip
+REM ETAPE 6: Copie du projet, normalisation UTF-8, pip ^(coeur PyPI uniquement^)
 REM ===================================================================
 echo %BLUE%=== ETAPE 6: Copie NPOAP, requirements UTF-8, installation pip ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 6: Copie NPOAP, requirements UTF-8, installation pip ===
+echo.
+echo Dependances installees depuis requirements_install_core.txt ^(PyPI seul, pas de git / ezpadova / PHOEBE / optionnels lourds^).
+echo Pour tout requirements.txt ^(git+, etc.^): conda activate %ENV_NAME% ^& pip install -r requirements.txt
 echo.
 
+if not exist "requirements_install_core.txt" (
+    echo %RED%ERREUR: requirements_install_core.txt introuvable dans le dossier du script!%RESET%
+    pause
+    exit /b 1
+)
 if not exist "requirements.txt" (
     echo %RED%ERREUR: requirements.txt introuvable dans le dossier du script!%RESET%
     pause
@@ -460,26 +541,44 @@ if exist "!INSTALL_DIR!" (
     attrib -R "!INSTALL_DIR!\*.*" /S >nul 2>&1
 )
 
-echo Copie des fichiers vers !INSTALL_DIR!...
-xcopy /E /I /Y /Q . "!INSTALL_DIR!" /EXCLUDE:exclude_files.txt
-set "XCOPY_EC=!errorLevel!"
-REM xcopy : 0 ok ; 1 aucun fichier a copier ; 2 arret utilisateur ; 4 erreur init ^(chemins, memoire^)
-if !XCOPY_EC! geq 4 (
-    echo %YELLOW%ATTENTION: xcopy code !XCOPY_EC! - tentative robocopy...%RESET%
-    robocopy "%~dp0." "!INSTALL_DIR!" /E /COPY:DAT /R:2 /W:3 /XD __pycache__ .git .conda .cache /XF *.pyc /NFL /NDL /NJH /NJS /NC /NS /NP
-    if errorlevel 8 (
-        echo %RED%ERREUR: copie vers !INSTALL_DIR! echouee ^(xcopy code !XCOPY_EC!, robocopy ^>=8^).%RESET%
+set "SKIP_PROJECT_COPY="
+set "SRC_CMP=!INSTALL_BAT_DIR!"
+if "!SRC_CMP:~-1!"=="\" set "SRC_CMP=!SRC_CMP:~0,-1!"
+set "DST_CMP=!INSTALL_DIR!"
+if "!DST_CMP:~-1!"=="\" set "DST_CMP=!DST_CMP:~0,-1!"
+if /i "!SRC_CMP!"=="!DST_CMP!" set "SKIP_PROJECT_COPY=1"
+
+if defined SKIP_PROJECT_COPY (
+    echo Dossier cible identique au dossier des sources - copie ignoree ^(evite "copie cyclique"^).
+) else (
+    echo Copie des fichiers vers !INSTALL_DIR!...
+    xcopy /E /I /Y /Q . "!INSTALL_DIR!" /EXCLUDE:exclude_files.txt
+    set "XCOPY_EC=!errorLevel!"
+    REM xcopy : 0 ok ; 1 aucun fichier a copier ; 2 arret utilisateur ; 4 erreur init ^(chemins, memoire^)
+    if !XCOPY_EC! geq 4 (
+        echo %YELLOW%ATTENTION: xcopy code !XCOPY_EC! - tentative robocopy...%RESET%
+        robocopy "!INSTALL_BAT_DIR!." "!INSTALL_DIR!" /E /COPY:DAT /R:2 /W:3 /XD __pycache__ .git .conda .cache /XF *.pyc /NFL /NDL /NJH /NJS /NC /NS /NP
+        if errorlevel 8 (
+            echo %RED%ERREUR: copie vers !INSTALL_DIR! echouee ^(xcopy code !XCOPY_EC!, robocopy ^>=8^).%RESET%
+        )
+    ) else if !XCOPY_EC! equ 2 (
+        echo %YELLOW%ATTENTION: xcopy interrompu ^(code 2^).%RESET%
     )
-) else if !XCOPY_EC! equ 2 (
-    echo %YELLOW%ATTENTION: xcopy interrompu ^(code 2^).%RESET%
+)
+if defined SKIP_PROJECT_COPY (
+    >>"!INSTALL_COMPLET_LOG!" echo Copie projet vers !INSTALL_DIR!: ignoree ^(sources identiques a la cible^).
+) else (
+    >>"!INSTALL_COMPLET_LOG!" echo Copie projet: xcopy code !XCOPY_EC! ^(sortie detaillee sur console^).
 )
 
 attrib -R "!INSTALL_DIR!\requirements.txt" >nul 2>&1
+attrib -R "!INSTALL_DIR!\requirements_install_core.txt" >nul 2>&1
 
-REM pip exige requirements.txt en UTF-8 ^(pas UTF-16 / Unicode Bloc-notes^)
-set "NORM_PS=%~dp0normalize_requirements_utf8.ps1"
+REM pip exige des fichiers requirements en UTF-8 ^(pas UTF-16 / Unicode Bloc-notes^)
+set "NORM_PS=!INSTALL_BAT_DIR!normalize_requirements_utf8.ps1"
 if exist "!NORM_PS!" (
-    echo Normalisation UTF-8 de requirements.txt pour pip...
+    echo Normalisation UTF-8 des fichiers requirements pour pip...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "!NORM_PS!" "!INSTALL_DIR!\requirements_install_core.txt"
     powershell -NoProfile -ExecutionPolicy Bypass -File "!NORM_PS!" "!INSTALL_DIR!\requirements.txt"
 ) else (
     echo %YELLOW%ATTENTION: normalize_requirements_utf8.ps1 absent - encodage requirements non corrige.%RESET%
@@ -494,42 +593,83 @@ if !errorLevel! neq 0 (
     exit /b 1
 )
 
-echo Mise a jour de pip...
-python -m pip install --upgrade pip
+set "PYTHONNOUSERSITE=1"
+set "PIP_USER="
+set "PY_ENV=!CONDA_INST_ROOT!\envs\%ENV_NAME%\python.exe"
+if not exist "!PY_ENV!" (
+    echo %RED%ERREUR: Python conda introuvable : !PY_ENV!%RESET%
+    pause
+    exit /b 1
+)
 
-echo Installation des dependances depuis requirements.txt...
-python -m pip install -r "!INSTALL_DIR!\requirements.txt"
+echo Mise a jour de pip, setuptools ^(version compatible STDPipe^) et wheel...
+"!PY_ENV!" -m pip install --upgrade pip "setuptools<81" wheel 1> "%TEMP%\npoap_pip_up.log" 2>&1
+set "PIP_UP_EC=!errorlevel!"
+type "%TEMP%\npoap_pip_up.log"
+type "%TEMP%\npoap_pip_up.log" >> "!INSTALL_COMPLET_LOG!"
 
-if !errorLevel! neq 0 (
-    echo %YELLOW%ATTENTION: Certaines dependances n'ont pas pu etre installees%RESET%
-    echo Veuillez verifier les erreurs ci-dessus.
+echo Installation des dependances ^(coeur PyPI^) depuis requirements_install_core.txt...
+"!PY_ENV!" -m pip install --prefer-binary -r "!INSTALL_DIR!\requirements_install_core.txt" 1> "%TEMP%\npoap_pip_core.log" 2>&1
+set "PIP_CORE_EC=!errorlevel!"
+type "%TEMP%\npoap_pip_core.log"
+type "%TEMP%\npoap_pip_core.log" >> "!INSTALL_COMPLET_LOG!"
+
+if !PIP_CORE_EC! neq 0 (
+    echo %YELLOW%ATTENTION: pip a signale une erreur. Verifiez les lignes ci-dessus ^(reseau, proxy, antivirus^).%RESET%
+    echo Pour reessayer : cd /d "!INSTALL_DIR!" ^& "!PY_ENV!" -m pip install --prefer-binary -r requirements_install_core.txt
 ) else (
-    echo %GREEN%Dependances installees avec succes!%RESET%
+    echo %GREEN%Dependances coeur installees avec succes!%RESET%
+    echo %YELLOW%Optionnel : PHOEBE, ezpadova ^(git^), lightkurve, pip complet ^>^> pip install -r requirements.txt ^(Git requis^)%RESET%
 )
 echo.
+
+REM ===================================================================
+REM ETAPE 6b: Rappel catalogue GLADE+ ^(Gladeplus.h5^)
+REM La distribution fournit le fichier HDF5 : copie dans %%USERPROFILE%%\.npoap\catalogues\
+REM Regeneration dev ^(GLADE+.txt, PyTables^) : scripts\download_and_convert_glade_catalog.py + requirements_glade_build.txt
+REM ===================================================================
+echo %BLUE%=== ETAPE 6b: Catalogue GLADE+ ^(Gladeplus.h5^) ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 6b rappel Gladeplus.h5 ===
+echo.
+echo Placez Gladeplus.h5 dans : %%USERPROFILE%%\.npoap\catalogues\
+echo ^(fichier joint a la distribution ; pas de telechargement automatique ici.^)
+echo Pour reglener localement : pip install -r requirements_glade_build.txt puis scripts\download_and_convert_glade_catalog.py
+echo.
+>>"!INSTALL_COMPLET_LOG!" echo Rappel : copier Gladeplus.h5 vers %%USERPROFILE%%\.npoap\catalogues\
 
 REM ===================================================================
 REM ETAPE 7: Creation des scripts de lancement
 REM ===================================================================
 echo %BLUE%=== ETAPE 7: Creation des scripts de lancement ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 7: Creation des scripts de lancement ===
 echo.
 
-REM Script de lancement principal
-(
-    echo @echo off
-    echo call "!CONDA_INST_ROOT!\Scripts\activate.bat" %ENV_NAME%
-    echo cd /d "%INSTALL_DIR%"
-    echo python main.py
-    echo pause
-) > "%INSTALL_DIR%\LANCER_NPOAP.bat"
+REM Lanceur unique: LANCER_NPOAP_ASTROENV.bat
+if exist "%INSTALL_DIR%\LANCEMENT.bat" del /f /q "%INSTALL_DIR%\LANCEMENT.bat" >nul 2>&1
+if exist "%INSTALL_DIR%\lancement.bat" del /f /q "%INSTALL_DIR%\lancement.bat" >nul 2>&1
 
-echo %GREEN%Script de lancement cree: %INSTALL_DIR%\LANCER_NPOAP.bat%RESET%
+if exist "!INSTALL_BAT_DIR!LANCER_NPOAP_ASTROENV.bat" (
+    copy /Y "!INSTALL_BAT_DIR!LANCER_NPOAP_ASTROENV.bat" "%INSTALL_DIR%\LANCER_NPOAP_ASTROENV.bat" >nul
+    echo %GREEN%Script de lancement copie: %INSTALL_DIR%\LANCER_NPOAP_ASTROENV.bat%RESET%
+) else (
+    echo %YELLOW%LANCER_NPOAP_ASTROENV.bat absent du package - generation d'un lanceur minimal vers %ENV_NAME%...%RESET%
+    (
+        echo @echo off
+        echo call "!CONDA_INST_ROOT!\Scripts\activate.bat" %ENV_NAME%
+        echo set "PYTHONNOUSERSITE=1"
+        echo cd /d "%INSTALL_DIR%"
+        echo "!CONDA_INST_ROOT!\envs\%ENV_NAME%\python.exe" main.py
+        echo pause
+    ) > "%INSTALL_DIR%\LANCER_NPOAP_ASTROENV.bat"
+    echo %GREEN%Script de lancement cree: %INSTALL_DIR%\LANCER_NPOAP_ASTROENV.bat%RESET%
+)
 echo.
 
 REM ===================================================================
 REM ETAPE 8: Test de l'installation
 REM ===================================================================
 echo %BLUE%=== ETAPE 8: Test de l'installation ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 8: Test de l'installation ===
 echo.
 
 call "!CONDA_INST_ROOT!\Scripts\activate.bat" %ENV_NAME%
@@ -537,7 +677,14 @@ cd /d "%INSTALL_DIR%"
 
 if exist "test_installation.py" (
     echo Execution des tests...
-    python test_installation.py
+    REM Ne pas forcer PYTHONUTF8=1 : sinon le log est UTF-8 et `type` sous cmd affiche des caracteres bizarres.
+    set "PYTHONUTF8="
+    set "PYTHONIOENCODING=cp1252"
+    "!PY_ENV!" test_installation.py 1> "%TEMP%\npoap_test_inst.log" 2>&1
+    set "PYTHONIOENCODING="
+    set "TEST_INST_EC=!errorlevel!"
+    type "%TEMP%\npoap_test_inst.log"
+    type "%TEMP%\npoap_test_inst.log" >> "!INSTALL_COMPLET_LOG!"
     echo.
 ) else (
     echo %YELLOW%test_installation.py introuvable, test ignore%RESET%
@@ -547,6 +694,7 @@ REM ===================================================================
 REM ETAPE 9: Protection des fichiers source
 REM ===================================================================
 echo %BLUE%=== ETAPE 9: Protection des fichiers source ===%RESET%
+>>"!INSTALL_COMPLET_LOG!" echo === ETAPE 9: Protection des fichiers source ===
 echo.
 
 echo Protection des fichiers source contre les modifications...
@@ -556,7 +704,7 @@ if exist "protect_files.bat" (
     echo Mise en lecture seule des fichiers source...
     attrib +R "*.py" >nul 2>&1
     attrib +R "*.md" >nul 2>&1
-    REM requirements.txt non verrouille : reinstall / pip / normalisation UTF-8
+    REM requirements*.txt non verrouilles : reinstall / pip / normalisation UTF-8
     attrib +R "core\*.*" /S >nul 2>&1
     attrib +R "gui\*.*" /S >nul 2>&1
     attrib +R "utils\*.*" /S >nul 2>&1
@@ -564,6 +712,8 @@ if exist "protect_files.bat" (
     REM Ne pas protéger les fichiers nécessaires à l'exécution
     attrib -R "config.py" >nul 2>&1
     attrib -R "config.json" >nul 2>&1
+    attrib -R "requirements.txt" >nul 2>&1
+    attrib -R "requirements_install_core.txt" >nul 2>&1
     if exist "logs" attrib -R "logs\*.*" /S >nul 2>&1
     if exist "output" attrib -R "output\*.*" /S >nul 2>&1
     echo %GREEN%Fichiers proteges en lecture seule%RESET%
@@ -574,27 +724,55 @@ echo.
 echo ============================================================
 echo   Installation terminee!
 echo ============================================================
+>>"!INSTALL_COMPLET_LOG!" echo.
+>>"!INSTALL_COMPLET_LOG!" echo ============================================================
+>>"!INSTALL_COMPLET_LOG!" echo Installation principale terminee: %date% %time%
+>>"!INSTALL_COMPLET_LOG!" echo Journal complet: !INSTALL_COMPLET_LOG!
+>>"!INSTALL_COMPLET_LOG!" echo ============================================================
+echo.
+echo Journal complet de cette installation: !INSTALL_COMPLET_LOG!
 echo.
 echo Pour lancer NPOAP, utilisez:
-echo   %INSTALL_DIR%\LANCER_NPOAP.bat
+echo   %INSTALL_DIR%\LANCER_NPOAP_ASTROENV.bat
 echo.
-echo Ou depuis la ligne de commande:
+echo Ou depuis la ligne de commande ^(sans melanger avec AppData\Roaming\Python311^):
 echo   call "!CONDA_INST_ROOT!\Scripts\activate.bat" %ENV_NAME%
+echo   set PYTHONNOUSERSITE=1
 echo   cd %INSTALL_DIR%
-echo   python main.py
+echo   "!CONDA_INST_ROOT!\envs\%ENV_NAME%\python.exe" main.py
 echo.
 echo ------------------------------------------------------------
 echo   Composants optionnels (scripts dans le dossier NPOAP)
 echo ------------------------------------------------------------
+echo   Installation auto de tous les optionnels : install_optionnels.bat
 echo   Visual C++ Build Tools / MSVC .... install_msvc_build_tools.bat
 echo   CMake .......................... install_cmake.bat
 echo   WSL ............................ install_wsl.bat
-echo   Ubuntu (distro WSL) ............ install_ubuntu_wsl.bat
+echo   WSL very_Lite ^(recommande^) .... install_ubuntu_wsl_very_lite.bat
+echo   Ubuntu Store ^(lourde^) ......... install_ubuntu_wsl.bat
 echo   Astrometry.net dans WSL ........ install_astrometry_wsl.bat
-echo   KBMOD sous WSL/Linux ........... install_kbmod_wsl.bat
-echo   Prospector ..................... INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat
+echo   KBMOD sous WSL ^(installation auto^) .. install_kbmod_wsl.bat
+echo   Prospector + FSPS via WSL ...... Installation_fsps\prospector.bat
+echo   SORA ^(depannage seul^) ....... INSTALLER_SORA_ASTROENV.bat  ^(sinon : requirements_install_optionnels.txt^)
+echo   GLADE+ ^(regeneration dev^) .. requirements_glade_build.txt + scripts\download_and_convert_glade_catalog.py
 echo.
 echo Ouvrez le fichier texte LISTE_INSTALL_OPTIONNELS.txt pour le meme tableau.
+echo.
+set "RUN_OPTIONNELS="
+set /p RUN_OPTIONNELS="Lancer install_optionnels.bat maintenant pour executer toute la sequence optionnelle ? (O/N): "
+if /i "!RUN_OPTIONNELS!"=="O" (
+    if exist "install_optionnels.bat" (
+        echo.
+        echo Lancement de install_optionnels.bat...
+        set "INSTALL_COMPLET_LOG=!INSTALL_DIR!\install_complet.log"
+        call "install_optionnels.bat"
+    ) else (
+        echo.
+        echo %YELLOW%install_optionnels.bat introuvable dans %CD%.%RESET%
+    )
+) else (
+    echo Composants optionnels ignores pour cette execution.
+)
 echo.
 pause
 

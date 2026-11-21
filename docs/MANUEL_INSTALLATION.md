@@ -2,10 +2,28 @@
 
 **NPOAP - Nouvelle Plateforme d'Observation et d'Analyse Photométrique**
 
-Version 1.0 (révisions procédure : vérification `test_installation.py`, CuPy/`importlib.metadata`, ligne KBMOD dans `requirements.txt`)
+Version 1.0 (révisions : `test_installation.py`, **wotan**, Prospector/FSPS WSL, gain PTC, **ExoPlanetPie natif**, profil **`photometrie_exoplanetes`** ; **mai 2026** : installation en **deux profils pip** — `requirements_install_core.txt` (`installation.bat`) et `requirements_install_optionnels.txt` (`install_optionnels.bat`) ; **`exoclock`** dans le **cœur** ; onglet **Contrôle NINA** ; publication distro **full** → [PUBLICATION_DISTRIBUTION_FULL.md](PUBLICATION_DISTRIBUTION_FULL.md))
 
 **Responsable HOPS-modified** : J.P Vignes  
 **Contact** : jeanpascal.vignes@gmail.com
+
+---
+
+## Mises à jour depuis hier 08:00
+
+- **Workflow ExoPlanetPie natif** (panneau droit de l'onglet *🔭 Photométrie Exoplanètes*, à côté de HOPS) : ré-implémentation en Python natif de la chaîne **batman + ultranest + ExoTETHyS** avec récupération des paramètres planète via **ExoClock** / **NASA Exoplanet Archive** et téléchargement des courbes TESS / Kepler via **lightkurve** (MAST). Dépendances ajoutées à `requirements.txt` : `batman-package>=2.4.9`, `exotethys>=1.0.0`, `lightkurve>=2.4.0` (ainsi que `wotan>=1.9` déjà présent). `ultranest` est déjà fourni au profil principal et au profil optionnel.
+- **Nouveau profil de distribution `photometrie_exoplanetes`** : *Accueil + Photométrie Exoplanètes uniquement* (HOPS + workflow batman/ultranest/ExoTETHyS), **sans** onglet *Réduction CCD* ni `ccdproc`/`reproject`/`astroscrappy`/`astride`/`phoebe`. Voir **§10 Méthode 1** ci-dessous, et `construire_distribution.bat` (option **8**).
+- **Prospector/FSPS** : la voie Windows native a été retirée ; le flux recommandé et supporté est désormais `Installation_fsps\prospector.bat` (WSL).
+- **Installateurs supprimés** : `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat` et `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.ps1`.
+- **Lanceur NPOAP** : `LANCER_NPOAP_ASTROENV.bat` active un backend Prospector WSL par défaut (`NPOAP_PROSPECTOR_BACKEND=wsl`), tout en gardant un mode strict optionnel via `NPOAP_STRICT_ENV=1`.
+- **Stabilité WSL** : `Installation_fsps\prospector.bat` a été durci (gestion CRLF/LF, quoting, code retour fiable, console persistante).
+- **Transitoires/STDPipe** : dégradation propre d'ASTRiDE si environnement incompatible (plus de crash d'import global).
+- **Dépendances** : alignement `photutils`/`astride`, installation `lightkurve` et `synphot` validées dans le flux astroenv.
+- **Configuration** : le gain (e⁻/ADU) issu de l’analyse PTC peut être enregistré dans `config.json` ; voir [§8 – Configuration initiale](#8-configuration-initiale) et le manuel utilisateur (réduction / PTC). Le dossier profil **`.npoap`** est décrit en **§1** du manuel utilisateur et rappelé en **§8** ci-dessous.
+- **Installation en deux temps** : `installation.bat` installe le **cœur** depuis **`requirements_install_core.txt`** (dont **`exoclock`**, **sora-astro**, **exotethys**, **wotan**, etc.) ; **`install_optionnels.bat`** installe ensuite PHOEBE, rebound, ultranest, batman-package, sncosmo, STDPipe… via **`requirements_install_optionnels.txt`**.
+- **ExoClock** : le paquet **`exoclock`** fait partie du **cœur** (HOPS, éphémérides de nuit, repli si le catalogue HTTP est indisponible). L’onglet *Observation de la nuit* interroge en priorité **`https://www.exoclock.space/database/planets_json`** sans dépendre du module pour le catalogue.
+- **Contrôle NINA** : aucune dépendance pip supplémentaire (client HTTP **`requests`** déjà dans le cœur). NINA et son API avancée doivent être installés sur le **PC télescope** (voir manuel utilisateur [§14](MANUEL_UTILISATEUR.md#14-controle-nina)).
+- **Distribution full sur GitHub** : après `construire_distribution.bat` (option **7**), voir **`docs/PUBLICATION_DISTRIBUTION_FULL.md`** et **`build/publish_full_to_github.bat`**.
 
 ---
 
@@ -127,7 +145,34 @@ Si vous préférez utiliser Python sans Conda :
 
 ## 4. Installation des dépendances Python
 
-### Méthode recommandée : requirements.txt
+### Méthode recommandée : `installation.bat` (cœur) puis optionnels
+
+Sur Windows, le script **`installation.bat`** (administrateur) crée l’environnement **`astroenv`** et exécute :
+
+```cmd
+pip install -r requirements_install_core.txt
+```
+
+Ce fichier regroupe le **cœur** NPOAP (astropy, photutils, ccdproc, **exoclock**, **sora-astro**, **exotethys**, **wotan**, etc.) **sans** les paquets lourds ou à compilation fréquente (PHOEBE, rebound, ultranest, batman-package, sncosmo, STDPipe…).
+
+Ensuite, pour une installation **complète** :
+
+```cmd
+install_optionnels.bat
+```
+
+ou manuellement :
+
+```cmd
+conda activate astroenv
+pip install -r requirements_install_optionnels.txt
+```
+
+Le détail des scripts optionnels (MSVC, WSL, KBMOD…) est dans **`LISTE_INSTALL_OPTIONNELS.txt`**.
+
+### Installation développeur : `requirements.txt` complet
+
+Pour le **dépôt de développement** (toutes les dépendances, y compris lignes `git+https` comme **ezpadova**) :
 
 1. **S'assurer que l'environnement est activé** :
    ```cmd
@@ -148,13 +193,16 @@ Si vous préférez utiliser Python sans Conda :
    - Les bibliothèques astronomiques (astropy, photutils, astroquery, **ccdproc**, **reproject**)
    - Les outils de calcul scientifique (numpy, scipy, pandas)
    - **reproject** : nécessaire pour l’alignement WCS des images en réduction (reprojection sur une grille commune)
-   - **exotethys**, **h5py**, **click** : limb darkening / modules associés (ex. workflow ExoTETHyS)
-   - **specutils**, **lightkurve** : spectroscopie et séries temporelles (selon les onglets utilisés)
+   - **batman-package** : modèle de transit utilisé par le **workflow ExoPlanetPie natif** (panneau droit de l’onglet *Photométrie Exoplanètes*, à côté de HOPS) ; voir `core/exoplanetpie_pipeline.py` et le *Manuel utilisateur* §4
+   - **exotethys**, **h5py**, **click** : limb darkening / modules associés. **ExoTETHyS** alimente le workflow natif (modèles stellaires Phoenix/Stagger/Atlas, chaîne de repli automatique)
+   - **specutils**, **lightkurve** : spectroscopie et séries temporelles. **lightkurve** sert également au téléchargement TESS / Kepler (MAST) dans le workflow ExoPlanetPie natif
    - **stdpipe**, **synphot** : pipelines photométriques / SED
+   - **sncosmo**, **iminuit** : ajustement SN Ia (SALT2/SALT3) dans l’onglet **Photométrie Transitoires**
    - **ezpadova** (dépôt Git, ligne `git+https://github.com/mfouesneau/ezpadova` dans le fichier) : isochrones PARSEC pour l’analyse d’amas
    - Les bibliothèques pour l'extraction de catalogues (requests pour MPC, TESS EBS, Exoplanet.eu)
-   - Les outils d'analyse (emcee, statsmodels, pylightcurve)
-   - Les outils optionnels ou avancés (phoebe, rebound, ultranest, etc.)
+   - **exoclock** : catalogue et outils **ExoClock** (HOPS, éphémérides de nuit ; repli si HTTP `planets_json` indisponible) — présent aussi dans **`requirements_install_core.txt`**
+   - Les outils d'analyse (emcee, statsmodels, pylightcurve, **wotan** : détrendage optionnel des segments de transit dans le viewer d’affinage Tc / TTV et dans le workflow ExoPlanetPie natif)
+   - Les outils optionnels ou avancés (phoebe, rebound, **ultranest** : nested sampling utilisé conjointement par le simulateur N-body TTV et par le workflow ExoPlanetPie natif ; souvent installés via **`requirements_install_optionnels.txt`**)
 
    **Note** : Les packages **ezpadova** (isochrones PARSEC pour l'onglet Analyse d'amas) et **Prospector** ne sont pas sur PyPI ; ils doivent être installés séparément depuis GitHub (voir section 5).
 
@@ -179,7 +227,12 @@ pip install emcee>=3.1.0
 pip install "phoebe>=2.4.22,<2.5"
 pip install reportlab>=3.6.0
 pip install pylightcurve>=4.0.0
+pip install wotan>=1.9
 pip install statsmodels>=0.13.0
+pip install batman-package>=2.4.9   # workflow ExoPlanetPie natif (panneau droit Photométrie Exoplanètes)
+pip install ultranest>=0.7.0        # nested sampling pour TTV et workflow ExoPlanetPie natif
+pip install exotethys>=1.0.0        # coefficients de limb-darkening (Phoenix/Stagger/Atlas)
+pip install lightkurve>=2.4.0       # téléchargement courbes TESS / Kepler via MAST
 ```
 
 ### Installation sur Linux : dépendances système
@@ -200,6 +253,27 @@ sudo dnf install python3-tkinter python3-devel gcc gcc-c++
 ---
 
 ## 5. Installation des dépendances optionnelles
+
+### Profil pip unifié (`install_optionnels.bat`)
+
+Le fichier **`requirements_install_optionnels.txt`** regroupe notamment :
+
+| Paquet / thème | Usage NPOAP |
+|----------------|-------------|
+| **phoebe** | Onglet *Étoiles binaires* |
+| **rebound**, **ultranest** | N-body, TTV, workflow ExoPlanetPie natif |
+| **batman-package** | Modèle de transit (ExoPlanetPie natif) |
+| **sora-astro** | Déjà dans le cœur ; réinstallé si besoin |
+| **sncosmo**, **iminuit** | SN Ia (transitoires) |
+| **stdpipe**, **scikit-learn**, **celerite2** | Pipeline transitoires / GP |
+
+**`exoclock`** n’est **pas** dans ce fichier : il est installé avec le **cœur** (§4).
+
+Lancement automatique (après `installation.bat`) :
+
+```cmd
+install_optionnels.bat
+```
 
 ### PHOEBE2 (Étoiles Binaires)
 
@@ -237,49 +311,38 @@ pip install phoebe
 
 Prospector est un outil Python pour inférer les propriétés stellaires à partir de données spectroscopiques et photométriques (SED - Spectral Energy Distribution). Il utilise l'inférence bayésienne avec des modèles de populations stellaires simples (SSP).
 
-#### Installation de Prospector
+**IMPORTANT** : le paquet **astro-prospector** doit être installé depuis **GitHub** (`bd-j/prospector`), pas depuis PyPI. Le nom `prospector` sur PyPI désigne un **autre** logiciel (analyse statique de code Python).
 
-**IMPORTANT** : Prospector doit être installé depuis GitHub, pas depuis PyPI. Le package `prospector` sur PyPI est un autre outil (analyse de code Python).
+#### Voie A — WSL2 (Linux) : FSPS / Prospector dans un venv dédié (recommandée)
 
-**Méthode recommandée** : Utiliser le script d'installation automatique :
+Pour un environnement **Linux** avec **gfortran** et souvent une installation **fsps** plus simple, utilisez le dossier **`Installation_fsps/`** :
+
+- **`Installation_fsps/prospector.bat`** (Windows) appelle **`Installation_fsps/install_prospector_wsl.sh`** dans WSL.
+- Prérequis : **WSL2** et une distro type **Ubuntu** (`install_wsl.bat`, puis `install_ubuntu_wsl_very_lite.bat` recommande — voir `docs/WSL_VERY_LITE.md` ; ou `install_ubuntu_wsl.bat` Ubuntu Store).
+
+Cette voie installe un **venv séparé** sous Linux (`~/.local/share/npoap-prospector-wsl/venv` par défaut). Dans les versions récentes de NPOAP, l’onglet Spectroscopie peut utiliser ce backend WSL directement (variable `NPOAP_PROSPECTOR_BACKEND=wsl`, activée par défaut dans le lanceur).
+
+**Vérification rapide** :
 
 ```cmd
-# Script Batch (Windows)
-INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat
-
-# Script PowerShell (Windows - alternative)
-.\INSTALLER_PROSPECTOR_COMPLET_WINDOWS.ps1
+wsl -e bash -lc "source \"$HOME/.local/share/npoap-prospector-wsl/venv/bin/activate\" && export SPS_HOME=\"$HOME/.local/share/fsps\" && python3 -c \"import prospect, fsps; print('OK WSL')\""
 ```
 
-**Installation manuelle** :
+#### Voie B — Installation manuelle (Windows, sans FSPS complet)
 
 ```cmd
 conda activate astroenv
 
-# 1. Installer les dépendances de base
 pip install numpy>=1.20.0 scipy>=1.7.0 pandas>=1.3.0 astropy>=5.0.0
-
-# 2. Installer sedpy depuis GitHub (IMPORTANT: pas PyPI)
 pip uninstall sedpy -y
 pip install git+https://github.com/bd-j/sedpy.git --no-cache-dir
-
-# 3. Installer les autres dépendances
-pip install dynesty>=2.0.0 dill>=0.3.0 h5py>=3.0.0 emcee>=3.1.0
-
-# 4. Installer Prospector depuis GitHub
+pip install dynesty>=2.0.0 dill>=0.3.0 h5py>=3.0.0 emcee>=3.1.0 corner>=2.2.3 matplotlib>=3.8.4
 pip install git+https://github.com/bd-j/prospector.git --no-cache-dir
 ```
 
-**Vérification** :
-```cmd
-python -c "import prospect; from prospect.models import SpecModel; print('Prospector OK!')"
-```
+Si la dernière ligne échoue à cause de **fsps** : `pip install git+https://github.com/bd-j/prospector.git --no-deps` puis installer **fsps** séparément ou s’en tenir aux stubs (comme le script automatique).
 
-**FSPS (Flexible Stellar Population Synthesis)** : Optionnel mais recommandé pour les fonctionnalités avancées. FSPS nécessite CMake et gfortran sur Windows. Pour une installation plus simple, utilisez WSL (voir `docs/PROTOCOLE_INSTALLATION_PROSPECTOR_WINDOWS.md`).
-
-**Note** : Si FSPS n'est pas installé, Prospector fonctionne avec des fichiers stub créés automatiquement, mais certaines fonctionnalités avancées seront limitées.
-
-Pour plus de détails, consultez `docs/PROTOCOLE_INSTALLATION_PROSPECTOR_WINDOWS.md`.
+**FSPS** : sous Windows natif, la compilation reste fragile ; privilégiez la voie WSL pour un FSPS opérationnel.
 
 ### CuPy (Accélération GPU - Optionnel - NON REQUIS)
 
@@ -450,6 +513,7 @@ Dans l'onglet **Astéroïdes**, après avoir chargé un dossier d'images FITS, c
    ├── main.py
    ├── requirements.txt
    ├── config.py
+   ├── config.json          # (optionnel) crée à la 1re sauvegarde depuis l’onglet Accueil ou enregistrement PTC
    ├── gui/
    ├── core/
    └── utils/
@@ -461,14 +525,28 @@ Dans l'onglet **Astéroïdes**, après avoir chargé un dossier d'images FITS, c
    - Entrez votre clé API Astrometry.net (obtenue sur https://nova.astrometry.net/)
    - Cliquez sur "Sauvegarder"
 
-4. **Installation de HOPS dans l'onglet Photométrie Exoplanètes** :
+4. **Fichier `config.json` (paramètres locaux, optionnel la première fois)** :
+   - Les réglages saisis dans l’onglet **Accueil** (observatoire, matériel, affiliations, clé API éventuelle) sont enregistrés dans **`config.json`** à la racine du dossier NPOAP.
+   - Ce fichier n’est **pas** livré d’office dans l’archive : il apparaît après la **première sauvegarde** depuis l’Accueil, ou dès qu’une autre fonction écrit la configuration.
+   - **Gain caméra (PTC)** : après une **analyse PTC** (onglet *Réduction de Données*) ou un **export PTC**, NPOAP peut enregistrer le gain (e⁻/ADU) dans `config.json`, sous le chemin logique `equipment` → clé **`camera_gain_e_per_adu`**. Cette valeur est ensuite utilisée lors de la **calibration** pour fixer l’en-tête **GAIN** des images calibrées. Les valeurs par défaut et la structure des dictionnaires sont définies dans `config.py` ; `config.json` **complète** ou **surcharge** ces réglages pour votre machine.
+   - Vous pouvez dupliquer ou versionner `config.json` (autre télescope, autre site) : gardez un fichier JSON valide.
+   - **NINA (Contrôle NINA)** : la section **`nina`** de `config.json` enregistre l’hôte, le port (défaut **1888**), le protocole, les paramètres de capture test et de séquence (filtres, refroidissement, guidage, park). Remplie via le bouton **💾** de l’onglet *Contrôle NINA* ou fusionnée avec les valeurs par défaut de `config.py`.
+
+Dossier **profil utilisateur** (fichiers locaux hors dépôt NPOAP) :
+
+- Sous **Windows**, NPOAP utilise en particulier **`%USERPROFILE%\.npoap`**, par exemple **`C:\Users\<votre_compte>\.npoap`** (dossier masqué si l’explorateur ne montre pas les fichiers cachés).
+- Sous **Linux / macOS**, l’équivalent est **`~/.npoap`**.
+- Y figurent notamment : **`Coeftransformation/`** (coefficients de transformation), **`gaia_cache/`**, **`reference_images/`**, **`catalogues/`** (défaut onglet *Observation de la nuit*). Le détail des rôles est donné au **manuel utilisateur** ([§1 — Emplacements des données (`.npoap`)](MANUEL_UTILISATEUR.md#emplacements-données-npoap)).
+- Ce dossier n’est **pas** celui de `config.json` (racine NPOAP) ni du répertoire de travail d’images.
+
+5. **Installation de HOPS dans l'onglet Photométrie Exoplanètes** :
    - Ouvrez NPOAP, onglet **Photométrie Exoplanètes**
    - Cliquez sur **Installer / Réinstaller HOPS (ZIP)**
    - Sélectionnez l'archive `HOPS-modified.zip` (ou `hops-master.zip` si vous utilisez l'archive officielle)
    - L'installation est faite dans : `external_apps/hops/hops-master`
    - Cliquez ensuite sur **Lancer HOPS**
 
-   **Note** : au premier lancement, les dépendances HOPS peuvent être installées automatiquement (ex. `exoclock`).
+   **Note** : **`exoclock`** est normalement déjà installé avec le **cœur** (`requirements_install_core.txt`). Si HOPS signale son absence, exécutez `pip install exoclock` dans **astroenv** ou relancez `installation.bat`.
 
 ### Filtres photométriques (choix et installation)
 
@@ -523,13 +601,48 @@ solve-field --version
 
 ### Méthode 1 : Distribution préconstruite (recommandé)
 
-Si vous utilisez une distribution NPOAP (dossier « reduction », « exoplanets », « full », etc., généré par le build) :
+Si vous utilisez une distribution NPOAP (dossier « reduction », « exoplanets », « **photometrie_exoplanetes** », « full », etc., généré par le build) :
+
+> **Profils disponibles** (sortie de `construire_distribution.bat`) :
+>
+> 1. **reduction** — Accueil + Réduction
+> 2. **exoplanets** — Accueil + Réduction + Exoplanètes
+> 3. **asteroids** — Accueil + Réduction + Photométrie Astéroïdes
+> 4. **binary_stars** — Accueil + Étoiles Binaires + Easy Lucky Imaging
+> 5. **transient** — Accueil + Réduction + Photométrie Transitoires
+> 6. **catalogues** — Accueil + Catalogues + Analyse des Données
+> 7. **full** — Tous les modules
+> 8. **photometrie_exoplanetes** — Accueil + Photométrie Exoplanètes **uniquement** (HOPS + workflow natif batman / ultranest / ExoTETHyS, **sans** réduction CCD)
+>
+> Construction depuis le dépôt :
+>
+> ```cmd
+> construire_distribution.bat
+> :: puis choisir 8 pour photometrie_exoplanetes
+> ```
+>
+> ou en CLI depuis l'environnement astroenv :
+>
+> ```cmd
+> python build\build_distribution.py photometrie_exoplanetes
+> ```
+>
+> Le `requirements.txt` du profil **`photometrie_exoplanetes`** est réduit (~17 paquets) : pas de `ccdproc`/`reproject`/`astroscrappy`/`astride`/`phoebe`/`sora-astro`/`sncosmo`.
+
+#### Publication de la distribution **full** sur GitHub
+
+Pour mettre à jour le dépôt public [**Jpvignes83/-NPOAP-Ver.Beta1.0**](https://github.com/Jpvignes83/-NPOAP-Ver.Beta1.0) après un build complet :
+
+1. `construire_distribution.bat` → option **7 — Complet**
+2. `build\publish_full_to_github.bat` (commit + push depuis `build\distributions\full\`)
+
+Procédure détaillée, conflits d’historique et branches de release : **`docs/PUBLICATION_DISTRIBUTION_FULL.md`**.
 
 1. **Prérequis** : [Miniconda](https://docs.conda.io/en/latest/miniconda.html) ou Anaconda installé (Python **3.11** recommandé pour l’environnement **astroenv**).
 2. Ouvrez le dossier de la distribution (il contient `main.py` et un `requirements.txt` propre au **profil** : réduction, exoplanètes, complet, etc.).
 3. **Première installation** : double-cliquez sur **`INSTALLER_NPOAP_ASTROENV_WINDOWS.bat`**. Le script crée l’environnement conda **`astroenv`** s’il n’existe pas (`python=3.11`), l’active, puis exécute **`pip install -r requirements.txt`** pour ce profil.  
    - *Rétro-compatibilité* : le profil « full » peut aussi fournir **`INSTALLER_DISTRIBUTION_FULL_WINDOWS.bat`**, qui appelle le même installateur.
-4. **Lancements suivants** : double-cliquez sur **`lancement.bat`**. Ce script **exige** que **astroenv** soit utilisable (il ne retombe plus sur un Python « nu » du PATH). En cas d’erreur, réexécutez l’installateur ou ouvrez une **Anaconda Prompt** et vérifiez `conda activate astroenv` (voir Méthode 2).
+4. **Lancements suivants** : double-cliquez sur **`LANCEMENT.bat`**. Ce script **exige** que **astroenv** soit utilisable (il ne retombe plus sur un Python « nu » du PATH). En cas d’erreur, réexécutez l’installateur ou ouvrez une **Anaconda Prompt** et vérifiez `conda activate astroenv` (voir Méthode 2).
 
 Les anciennes distributions qui utilisaient un dossier **`venv`** local ne sont plus le mode par défaut : tout est centralisé dans **astroenv**.
 
@@ -638,7 +751,7 @@ Le journal est configuré en mode **erreurs uniquement** (avec traces d'exceptio
 conda activate astroenv
 pip install reproject
 ```
-Puis relancez NPOAP avec **lancement.bat** (ou après `conda activate astroenv`). Si vous lancez par double-clic, assurez-vous que le script active bien astroenv (voir section 10).
+Puis relancez NPOAP avec **`LANCEMENT.bat`** (ou après `conda activate astroenv`). Si vous lancez par double-clic, assurez-vous que le script active bien astroenv (voir section 10).
 
 ### Erreur : "No module named 'readline'" (PHOEBE2 sur Windows)
 
@@ -658,6 +771,12 @@ Cette erreur est normale sur Windows. Elle est gérée automatiquement par l'app
    `pip uninstall cupy cupy-cuda11x cupy-cuda12x cupy-cuda13x -y` puis par exemple `pip install cupy-cuda12x` selon votre CUDA (voir section CuPy).
 
 ### Erreur lors de l'installation de Prospector
+
+**Erreur** : échec de compilation de **fsps** sous Windows
+
+**Cause** : il manque **gfortran** (Fortran). CMake et MSVC peuvent être présents sans Fortran.
+
+**Conséquence habituelle** : Prospector peut rester utilisable avec stubs **SPS_HOME**. Pour un **FSPS** complet, utilisez la voie **WSL** (`Installation_fsps/prospector.bat`).
 
 **Erreur** : `ModuleNotFoundError: No module named 'sedpy.observate'`
 
@@ -683,7 +802,7 @@ pip install astropy>=5.0.0
 **Solution** : Supprimez le fichier stub et relancez l'installation :
 ```cmd
 del "%USERPROFILE%\.local\share\fsps\dust\Nenkova08_y010_torusg_n10_q2.0.dat"
-# Puis relancez INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat
+# Puis relancez Installation_fsps\prospector.bat (WSL)
 ```
 
 Pour plus de détails, consultez `docs/PROTOCOLE_INSTALLATION_PROSPECTOR_WINDOWS.md`.
@@ -740,18 +859,18 @@ conda activate astroenv
 pip install --upgrade -r requirements.txt
 ```
 
-### Installation de Prospector (optionnel)
+### Installation de Prospector/FSPS (optionnel)
 
 ```cmd
-conda activate astroenv
-# Utiliser le script automatique (recommandé)
-INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat
+REM Recommande : installation dans WSL (FSPS complet)
+Installation_fsps\prospector.bat
 
-# Ou installation manuelle
+REM Ou installation manuelle dans astroenv :
+conda activate astroenv
 pip install numpy>=1.20.0 scipy>=1.7.0 pandas>=1.3.0 astropy>=5.0.0
 pip uninstall sedpy -y
 pip install git+https://github.com/bd-j/sedpy.git --no-cache-dir
-pip install dynesty>=2.0.0 dill>=0.3.0 h5py>=3.0.0 emcee>=3.1.0
+pip install dynesty>=2.0.0 dill>=0.3.0 h5py>=3.0.0 emcee>=3.1.0 corner>=2.2.3 matplotlib>=3.8.4
 pip install git+https://github.com/bd-j/prospector.git --no-cache-dir
 ```
 
@@ -770,7 +889,7 @@ conda env remove -n astroenv
 - **Protocole d'installation Prospector** : `docs/PROTOCOLE_INSTALLATION_PROSPECTOR_WINDOWS.md`
 - **Installation KBMOD sous WSL** : `docs/INSTALL_KBMOD_WSL.md`
 - **Logs de l'application** : Dossier `logs/`
-- **Configuration** : `config.py` et `config.json`
+- **Configuration** : `config.py` (défauts du code) et `config.json` (paramètres utilisateur : observatoire, équipement, dont le gain PTC `equipment.camera_gain_e_per_adu` le cas échéant)
 
 ---
 
@@ -809,6 +928,23 @@ NPOAP utilise de nombreuses bibliothèques et outils open-source de la communaut
   - Utilisée pour la modélisation des transits d'exoplanètes, le calcul des coefficients d'assombrissement du limbe, et l'ajustement flexible de courbes de lumière multi-époques
   - Licence MIT
 
+- **batman-package** : Modèle de transit analytique de Mandel & Agol (https://github.com/lkreidberg/batman)
+  - Auteur : **Laura Kreidberg** ; utilisé dans le **workflow ExoPlanetPie natif** (panneau droit de l'onglet *Photométrie Exoplanètes*) pour générer les modèles de transit ajustés par **ultranest**
+  - Citation : Kreidberg (2015), *PASP*, 127, 1161 ; DOI [10.1086/683602](https://doi.org/10.1086/683602)
+
+- **ExoTETHyS** : coefficients d'assombrissement du limbe stellaire (https://github.com/ucl-exoplanets/ExoTETHyS)
+  - Utilisé dans le **workflow ExoPlanetPie natif** pour le calcul des LDC (loi Claret-4) avec chaîne de repli automatique entre **Phoenix_2018**, **Stagger_2018**, **Atlas_2000** et autres grilles
+  - Citation : Morello et al. (2020), *AJ*, 159, 75 ; DOI [10.3847/1538-3881/ab63dc](https://doi.org/10.3847/1538-3881/ab63dc)
+
+- **lightkurve** : Bibliothèque Python pour les courbes TESS / Kepler / K2 via MAST (https://lightkurve.github.io/lightkurve/)
+  - Utilisée dans le **workflow ExoPlanetPie natif** pour la recherche et le téléchargement des séries TESS / Kepler depuis le **MAST** (filtrage des cadences par quality mask, export CSV vers `output/exoplanetpie/1_RawFiles/`)
+  - Développée par la communauté Kepler/TESS GO Office (NASA Ames / STScI)
+
+- **wotan (Wōtan)** : détrendage de courbes de lumière (https://github.com/hippke/wotan)
+  - Utilisé en option pour préparer le segment autour d’un transit avant l’ajustement trapézoïdal du Tc (masque transit basé sur Tc et T14) ; voir *Manuel utilisateur*, Analyse de données §7.1
+  - Utilisé également dans le **workflow ExoPlanetPie natif** (étape de normalisation / détrendage avant l’ajustement bayésien batman + ultranest)
+  - Citation : Hippke et al. (2019), *AJ*, 158, 143
+
 - **Pillow (PIL)** : Bibliothèque de traitement d'images (https://python-pillow.org/)
   - Utilisée pour le traitement et la manipulation d'images
 
@@ -827,8 +963,9 @@ NPOAP utilise de nombreuses bibliothèques et outils open-source de la communaut
   - Permet de modéliser les interactions gravitationnelles entre planètes
 
 - **ultranest** : Bibliothèque d'échantillonnage bayésien avec nested sampling (https://johannesbuchner.github.io/UltraNest/)
-  - Utilisée pour le fitting bayésien des modèles N-body aux observations TTV
+  - Utilisée pour le fitting bayésien des modèles N-body aux observations TTV **et** pour l'ajustement bayésien des transits dans le workflow ExoPlanetPie natif
   - Alternative robuste aux méthodes MCMC pour l'estimation de paramètres
+  - Citation : Buchner (2021), *JOSS*, 6 (60), 3001 ; algorithme **MLFriends** (Buchner 2014, 2019)
 
 - **STDPipe** : Simple Transient Detection Pipeline (https://stdpipe.readthedocs.io/)
   - Auteur principal : Sergey Karpov
@@ -836,6 +973,12 @@ NPOAP utilise de nombreuses bibliothèques et outils open-source de la communaut
   - Fournit des méthodes avancées de détection (segmentation, DAOStarFinder, IRAFStarFinder)
   - Permet le téléchargement d'images de référence depuis Pan-STARRS, SDSS, DES
   - Licence MIT
+
+- **sncosmo** (Cosmologie SNe) : https://sncosmo.readthedocs.io/
+  - Inclus dans l’installation standard via `requirements.txt`
+  - Utilisé pour l’ajustement **SALT2 / SALT3** de courbes de lumière **SN Ia** depuis l’onglet **Photométrie Transitoires** (boîte de dialogue dédiée)
+  - Les filtres **Gaia G, G_Bp, G_Rp** sont mappés vers les bandes intégrées `gaia::g`, `gaia::gbp`, `gaia::grp` (passbands eDR3 dans sncosmo)
+  - La boîte de fit inclut une correction optionnelle du rougissement MW via **IRSA Dust** (récupération de `E(B-V)` depuis RA/Dec)
 
 ### Services et catalogues externes
 

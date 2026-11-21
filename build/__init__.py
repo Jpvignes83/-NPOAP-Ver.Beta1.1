@@ -1,1 +1,1 @@
-# Module de build pour les distributions NPOAP
+# Package build NPOAP (distribution autonome, etc.)

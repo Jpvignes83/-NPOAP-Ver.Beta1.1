@@ -8,6 +8,8 @@ import logging
 import numpy as np
 from pathlib import Path
 
+from gui.manual_help import add_manual_help_header
+
 logger = logging.getLogger(__name__)
 
 # Import specutils
@@ -39,12 +41,19 @@ logger.info("GUI/SPECTROSCOPY_TAB: Début import Prospector")
 logger.info("=" * 60)
 try:
     logger.info("[GUI] Tentative d'import depuis core.prospector_analysis...")
-    from core.prospector_analysis import ProspectorAnalyzer, PROSPECTOR_AVAILABLE as PROSP_AVAIL
+    from core.prospector_analysis import (
+        ProspectorAnalyzer,
+        PROSPECTOR_AVAILABLE as PROSP_AVAIL,
+        PROSPECTOR_BACKEND,
+        PROSPECTOR_WSL_AVAILABLE,
+    )
     PROSPECTOR_AVAILABLE = PROSP_AVAIL
     logger.info(f"[GUI] ✓ Import réussi - PROSPECTOR_AVAILABLE = {PROSPECTOR_AVAILABLE}")
     logger.info(f"[GUI] ProspectorAnalyzer disponible: {ProspectorAnalyzer is not None}")
 except ImportError as e:
     PROSPECTOR_AVAILABLE = False
+    PROSPECTOR_BACKEND = "windows"
+    PROSPECTOR_WSL_AVAILABLE = False
     logger.error(f"[GUI] ✗ Erreur ImportError lors de l'import: {e}")
     logger.error(f"[GUI] Type d'erreur: {type(e).__name__}")
     import traceback
@@ -52,6 +61,8 @@ except ImportError as e:
     ProspectorAnalyzer = None
 except Exception as e:
     PROSPECTOR_AVAILABLE = False
+    PROSPECTOR_BACKEND = "windows"
+    PROSPECTOR_WSL_AVAILABLE = False
     logger.error(f"[GUI] ✗ Erreur inattendue lors de l'import: {e}")
     logger.error(f"[GUI] Type d'erreur: {type(e).__name__}")
     import traceback
@@ -112,7 +123,8 @@ class SpectroscopyTab(ttk.Frame):
         if SPECUTILS_AVAILABLE:
             try:
                 quantity_support()
-            except:
+            except Exception as e:
+                logger.debug(f"quantity_support failed: {e}")
                 pass
         
         self.create_widgets()
@@ -122,7 +134,8 @@ class SpectroscopyTab(ttk.Frame):
     
     def create_widgets(self):
         """Crée l'interface utilisateur"""
-        
+        add_manual_help_header(self, "11-spectroscopie")
+
         # En-tête
         header_frame = ttk.Frame(self)
         header_frame.pack(fill="x", pady=(0, 10))
@@ -173,7 +186,8 @@ class SpectroscopyTab(ttk.Frame):
                     text=f"✓ specutils {version} installé",
                     foreground="green"
                 )
-            except:
+            except Exception as e:
+                logger.debug(f"specutils version check failed: {e}")
                 self.status_label.config(
                     text="✓ specutils installé",
                     foreground="green"
@@ -205,6 +219,11 @@ class SpectroscopyTab(ttk.Frame):
                 version = getattr(prospect, '__version__', 'installé')
                 logger.info(f"[GUI] Version de prospect: {version}")
                 status_text = f"✓ Prospector {version} installé"
+                if PROSPECTOR_BACKEND == "wsl":
+                    if PROSPECTOR_WSL_AVAILABLE:
+                        status_text += " (backend WSL + FSPS)"
+                    else:
+                        status_text += " (backend WSL indisponible)"
                 
                 # Vérifier FSPS
                 try:
@@ -459,7 +478,10 @@ class SpectroscopyTab(ttk.Frame):
                     ("git+https://github.com/bd-j/sedpy.git", "sedpy (depuis GitHub)"),
                     "dynesty>=2.0.0",
                     "dill>=0.3.0",
-                    "h5py>=3.0.0"
+                    "h5py>=3.0.0",
+                    "emcee>=3.1.0",
+                    "corner>=2.2.3",
+                    "matplotlib>=3.8.4",
                 ]
                 
                 messagebox.showinfo(
@@ -469,12 +491,13 @@ class SpectroscopyTab(ttk.Frame):
                     "(le package 'prospector' sur PyPI est un autre outil).\n\n"
                     "Dépendances à installer:\n"
                     "- sedpy (depuis GitHub)\n"
-                    "- dynesty\n"
-                    "- dill\n"
-                    "- h5py\n"
+                    "- dynesty, dill, h5py, emcee, corner, matplotlib\n"
                     "- Prospector depuis GitHub\n\n"
+                    "Sous Windows sans compilateur Fortran (gfortran), la construction "
+                    "du paquet « fsps » échoue souvent : un second essai sans dépendances "
+                    "pip sera lancé automatiquement (stubs FSPS, comme l’installateur .ps1).\n\n"
                     "Cela peut prendre plusieurs minutes.\n"
-                    "Note: Git doit être installé pour cette opération."
+                    "Git doit être installé : https://git-scm.com/download/win"
                 )
                 
                 # Installer les dépendances
@@ -509,28 +532,64 @@ class SpectroscopyTab(ttk.Frame):
                         return
                     logger.info(f"[INSTALL] ✓ {package_display} installé avec succès")
                 
-                # Installer Prospector depuis GitHub
+                # Installer Prospector depuis GitHub (mode Windows local)
                 logger.info("[INSTALL] Installation de Prospector depuis GitHub...")
                 prospector_url = "git+https://github.com/bd-j/prospector.git"
                 logger.info(f"[INSTALL] URL: {prospector_url}")
+                
+                def _pip_combined_output(res):
+                    parts = [res.stdout or "", res.stderr or ""]
+                    return "\n".join(p for p in parts if p).strip()
+                
                 result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", prospector_url],
+                    [
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        prospector_url,
+                        "--no-cache-dir",
+                    ],
                     capture_output=True,
                     text=True,
-                    timeout=600
+                    timeout=600,
                 )
                 logger.info(f"[INSTALL] Retour code: {result.returncode}")
-                logger.info(f"[INSTALL] Sortie stdout:\n{result.stdout}")
-                if result.stderr:
-                    logger.warning(f"[INSTALL] Sortie stderr:\n{result.stderr}")
+                logger.info(f"[INSTALL] Sortie combinée:\n{_pip_combined_output(result)}")
+                
+                if result.returncode != 0:
+                    logger.warning(
+                        "[INSTALL] Premier essai échoué (souvent fsps : CMake/Fortran absents sous Windows). "
+                        "Second essai avec --no-deps…"
+                    )
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "pip",
+                            "install",
+                            prospector_url,
+                            "--no-cache-dir",
+                            "--no-deps",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=600,
+                    )
+                    logger.info(f"[INSTALL] Retour code (--no-deps): {result.returncode}")
+                    logger.info(f"[INSTALL] Sortie combinée:\n{_pip_combined_output(result)}")
                 
                 if result.returncode != 0:
                     logger.error("[INSTALL] ✗ Erreur lors de l'installation de Prospector")
-                    logger.error(f"[INSTALL] stderr: {result.stderr}")
+                    combo = _pip_combined_output(result)
+                    logger.error(f"[INSTALL] Sortie: {combo}")
                     messagebox.showerror(
                         "Erreur",
-                        f"Erreur lors de l'installation de Prospector depuis GitHub:\n{result.stderr}\n\n"
-                        "Assurez-vous que Git est installé: https://git-scm.com/download/win"
+                        "Erreur lors de l'installation de Prospector depuis GitHub.\n\n"
+                        f"{combo}\n\n"
+                        "Vérifiez Git et la connexion réseau.\n"
+                        "Pour FSPS complet, utilisez de préférence :\n"
+                        "Installation_fsps\\prospector.bat (WSL2).",
                     )
                     return
                 
@@ -675,6 +734,7 @@ class SpectroscopyTab(ttk.Frame):
                 # Vérifier l'installation
                 logger.info("[INSTALL] Vérification de l'installation...")
                 logger.info(f"[INSTALL] SPS_HOME={os.environ.get('SPS_HOME', 'NON DÉFINI')}")
+                prospect_import_ok = False
                 try:
                     import prospect
                     logger.info(f"[INSTALL] ✓ Module 'prospect' importé avec succès")
@@ -687,30 +747,41 @@ class SpectroscopyTab(ttk.Frame):
                         logger.info("[INSTALL] ✓ SpecModel importable")
                     except ImportError as e:
                         logger.warning(f"[INSTALL] ⚠ SpecModel non importable: {e}")
+                    prospect_import_ok = True
                 except Exception as e:
                     logger.error(f"[INSTALL] ✗ Impossible d'importer prospect après installation: {e}")
                     logger.error(f"[INSTALL] Type d'erreur: {type(e).__name__}")
                     import traceback
                     logger.error(f"[INSTALL] Traceback:\n{traceback.format_exc()}")
                 
-                messagebox.showinfo(
-                    "Succès",
-                    "Prospector et ses dépendances ont été installés avec succès!\n\n"
-                    "IMPORTANT: Redémarrez l'application pour utiliser Prospector.\n\n"
-                    "Note: Pour une analyse complète, installez également FSPS:\n"
-                    "- Voir docs/INSTALLATION_FSPS.md pour Windows\n"
-                    "- Ou utilisez WSL pour une installation plus simple"
-                )
-                
-                logger.info("[INSTALL] ========================================")
-                logger.info("[INSTALL] Installation terminée avec succès")
-                logger.info("[INSTALL] ========================================")
-                
-                # Mettre à jour le statut
-                self.prospector_status_label.config(
-                    text="✓ Prospector installé (redémarrez)",
-                    foreground="green"
-                )
+                if prospect_import_ok:
+                    messagebox.showinfo(
+                        "Succès",
+                        "Prospector et ses dépendances ont été installés avec succès.\n\n"
+                        "IMPORTANT : redémarrez l'application pour utiliser Prospector.\n\n"
+                        "Sans compilateur Fortran, fsps n'est en général pas installé : "
+                        "les stubs SPS_HOME suffisent pour une grande partie des usages.\n"
+                        "Pour FSPS complet : gfortran sous Windows ou "
+                        "Installation_fsps/prospector.bat sous WSL2.",
+                    )
+                    logger.info("[INSTALL] ========================================")
+                    logger.info("[INSTALL] Installation terminée avec succès")
+                    logger.info("[INSTALL] ========================================")
+                    self.prospector_status_label.config(
+                        text="✓ Prospector installé (redémarrez)",
+                        foreground="green",
+                    )
+                else:
+                    messagebox.showwarning(
+                        "Installation incomplète",
+                        "pip a terminé mais l'import de « prospect » a échoué dans cette session.\n\n"
+                        "Consultez les logs, vérifiez SPS_HOME et les stubs, puis redémarrez l'application.\n"
+                        "Sinon lancez Installation_fsps\\prospector.bat (WSL2) depuis le dossier NPOAP.",
+                    )
+                    self.prospector_status_label.config(
+                        text="Prospector : vérifier logs / redémarrer",
+                        foreground="orange",
+                    )
                 
             except Exception as e:
                 logger.error(f"[INSTALL] ✗ Erreur inattendue lors de l'installation: {e}")
@@ -1340,4 +1411,3 @@ class SpectroscopyTab(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Erreur", f"Erreur lors de l'analyse:\n{e}")
             logger.error(f"Erreur analyse galaxie Prospector: {e}", exc_info=True)
-

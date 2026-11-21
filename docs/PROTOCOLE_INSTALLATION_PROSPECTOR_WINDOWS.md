@@ -297,9 +297,16 @@ INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat
 ```
 
 **Avantages** :
-- Compatible avec tous les systèmes Windows
-- Ne nécessite pas PowerShell 5.0+
-- Interface interactive (demande confirmation pour FSPS)
+- Double-clic simple, pas besoin d’ajuster la politique d’exécution PowerShell à la main
+- Passe les arguments au `.ps1` (ex. `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat -InstallFSPS`)
+
+### Installation sous WSL2 (alternative pour FSPS)
+
+**Fichiers** : `Installation_fsps/prospector.bat` et `Installation_fsps/install_prospector_wsl.sh` (à conserver **ensemble** dans le même dossier). Certaines livraisons placent la paire à la **racine** du ZIP : même principe.
+
+**Usage** : après installation de **WSL2** + distro **Ubuntu** (ou équivalent), exécutez `prospector.bat` sous Windows. Le script Linux installe **gfortran**, **cmake**, un **venv** dédié sous `~/.local/share/npoap-prospector-wsl/`, **sedpy** depuis GitHub, puis **Prospector** (avec repli `--no-deps` + **fsps** si besoin).
+
+**Rôle** : environnement **Linux** séparé ; utile pour compiler ou utiliser **fsps** plus facilement qu’en natif Windows. **NPOAP** lancé depuis Windows continue d’utiliser **`astroenv`** ; la voie WSL ne remplace pas `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.*` pour intégrer Prospector au même Python que l’interface graphique.
 
 ---
 

@@ -25,6 +25,24 @@ stdpipe_photometry = None
 stdpipe_subtraction = None
 stdpipe_catalogues = None
 
+# stdpipe s'appuie encore sur pkg_resources (fourni par setuptools).
+# Dans certains environnements conda/pip, setuptools peut manquer.
+STDPIPE_PKG_RESOURCES_OK = True
+try:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="pkg_resources is deprecated as an API.*",
+            category=UserWarning,
+        )
+        import pkg_resources  # type: ignore  # noqa: F401
+except ImportError:
+    STDPIPE_PKG_RESOURCES_OK = False
+    logger.warning(
+        "pkg_resources introuvable (setuptools manquant). "
+        "Installez/maj setuptools dans astroenv: python -m pip install --upgrade setuptools"
+    )
+
 try:
     import stdpipe
     logger.info(f"Module stdpipe importé avec succès")
@@ -76,7 +94,13 @@ try:
         logger.info(f"STDPipe disponible avec modules: {', '.join(available_modules)}")
     else:
         STDPIPE_AVAILABLE = False
-        STDPIPE_ERROR = "STDPipe importé mais aucun sous-module essentiel n'est disponible"
+        if not STDPIPE_PKG_RESOURCES_OK:
+            STDPIPE_ERROR = (
+                "STDPipe importé mais ses sous-modules exigent pkg_resources/setuptools. "
+                "Installez/maj setuptools dans astroenv."
+            )
+        else:
+            STDPIPE_ERROR = "STDPipe importé mais aucun sous-module essentiel n'est disponible"
         logger.warning(STDPIPE_ERROR)
         
 except ImportError as e:
@@ -95,6 +119,23 @@ from astropy.time import Time
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 import astropy.units as u
+
+# Masques transitoires (saturation, L.A.Cosmic, trainées)
+import astroscrappy
+ASTRIDE_AVAILABLE = False
+astride_detect = None
+try:
+    import astride.detect as astride_detect
+    ASTRIDE_AVAILABLE = True
+except Exception as e:
+    # ASTRiDE peut casser avec certaines versions de photutils.
+    # On dégrade proprement: pas de masquage des trainées, mais le module reste fonctionnel.
+    ASTRIDE_AVAILABLE = False
+    logger.warning(
+        "ASTRiDE indisponible (masque des trainées désactivé): %s. "
+        "Essayez un photutils compatible avec astride si nécessaire.",
+        e,
+    )
 
 # Import synphot pour conversion de filtres
 try:
@@ -139,6 +180,267 @@ except ImportError:
     SKYVIEW_AVAILABLE = False
     SDSS_AVAILABLE = False
     logger.warning("astroquery n'est pas disponible. Les requêtes Gaia et le téléchargement d'images ne fonctionneront pas.")
+
+
+def _header_float(header: Any, key: str, default: Optional[float] = None) -> Optional[float]:
+    """Lit une valeur numérique depuis un en-tête FITS (clé absente ou invalide → default)."""
+    if header is None or key not in header:
+        return default
+    v = header.get(key)
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_saturation_cosmic_ray_mask(
+    image_data: np.ndarray,
+    header: Optional[fits.Header] = None,
+    *,
+    gain: Optional[float] = None,
+) -> np.ndarray:
+    """
+    Masque booléen (True = pixel à exclure) : NaN, saturation, rayons cosmiques (L.A.Cosmic / astroscrappy).
+    """
+    sat = _header_float(header, "SATURATE") if header is not None else None
+    if sat is None:
+        sat = float(0.90 * np.nanmax(image_data))
+
+    mask = np.isnan(image_data)
+    mask |= image_data > sat
+
+    g = gain if gain is not None else _header_float(header, "GAIN", 1.0)
+    if g is None or g <= 0:
+        g = 1.0
+
+    cr_extra = np.zeros_like(mask, dtype=bool)
+    logger.info("Détection des rayons cosmiques (L.A.Cosmic / astroscrappy)...")
+    try:
+        inmask = mask.astype(np.uint8)
+        res = astroscrappy.detect_cosmics(
+            image_data, inmask=inmask, gain=float(g), verbose=False
+        )
+        if isinstance(res, tuple):
+            crmask = None
+            for el in res:
+                if (
+                    isinstance(el, np.ndarray)
+                    and el.shape == image_data.shape
+                    and el.dtype == bool
+                ):
+                    crmask = el
+                    break
+            if crmask is None:
+                crmask = np.asarray(res[0], dtype=bool)
+        else:
+            crmask = np.asarray(res, dtype=bool)
+        cr_extra = crmask
+        logger.info("Détection saturation + rayons cosmiques terminée.")
+    except Exception as e:
+        logger.warning("Échec L.A.Cosmic (%s) — masque saturation + NaN uniquement.", e)
+
+    mask |= cr_extra
+    return mask
+
+
+def make_border_mask(
+    image: np.ndarray,
+    border: Any = 50,
+    invert: bool = True,
+    dtype: np.dtype = np.dtype(bool),
+) -> np.ndarray:
+    """
+    Masque des bords : ``invert=True`` → True sur les bandes de bordure (pixels exclus).
+    ``border=0`` désactive l'exclusion (masque entièrement False si invert=True).
+    """
+    import numbers
+
+    if image is None:
+        raise ValueError("Image cannot be None")
+    if not isinstance(image, np.ndarray):
+        raise TypeError("Image must be a numpy.ndarray")
+    if image.size == 0:
+        raise ValueError("Image cannot be empty")
+    if image.ndim < 2:
+        raise ValueError("Image must have at least 2 dimensions (height, width)")
+
+    height, width = int(image.shape[0]), int(image.shape[1])
+
+    if isinstance(border, numbers.Real):
+        b = int(border)
+        top = bottom = left = right = b
+    elif isinstance(border, (tuple, list, np.ndarray)):
+        if len(border) == 2:
+            vert, horiz = border
+            top = bottom = int(vert)
+            left = right = int(horiz)
+        elif len(border) == 4:
+            top, bottom, left, right = (int(x) for x in border)
+        else:
+            raise ValueError("If 'border' is a sequence it must have length 2 or 4")
+    else:
+        raise TypeError(
+            "border must be an int/float or a tuple/list/ndarray of length 2 or 4"
+        )
+
+    if any(x < 0 for x in (top, bottom, left, right)):
+        raise ValueError("Borders cannot be negative")
+    if top + bottom >= height or left + right >= width:
+        raise ValueError(
+            "Sum of top+bottom must be < image height and left+right must be < image width"
+        )
+
+    inner = np.zeros((height, width), dtype=bool)
+    inner[top : height - bottom, left : width - right] = True
+    out = (~inner if invert else inner).astype(dtype)
+    logger.debug(
+        "Masque bords (top=%s, bottom=%s, left=%s, right=%s, invert=%s)",
+        top,
+        bottom,
+        left,
+        right,
+        invert,
+    )
+    return out
+
+
+def build_satellite_trail_mask(
+    image_data: np.ndarray,
+    header: Optional[fits.Header] = None,
+    *,
+    temp_fits_path: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Masque True sur les pixels de trainées (satellite / avion) via ASTRiDE.
+    """
+    import shutil
+    import tempfile
+
+    shape = image_data.shape[:2]
+    empty = np.zeros(shape, dtype=bool)
+
+    cleanup_dir: Optional[str] = None
+    path = temp_fits_path
+    try:
+        if not ASTRIDE_AVAILABLE or astride_detect is None:
+            logger.info("ASTRiDE indisponible: masque des trainées ignoré.")
+            return empty
+
+        if path is None:
+            cleanup_dir = tempfile.mkdtemp(prefix="npoap_astride_")
+            path = str(Path(cleanup_dir) / "temp_image.fits")
+
+        hdu = fits.PrimaryHDU(image_data)
+        if header is not None:
+            for key in header:
+                try:
+                    hdu.header[key] = header[key]
+                except Exception:
+                    pass
+        hdu.writeto(path, overwrite=True)
+
+        logger.info("Détection des trainées (ASTRiDE)...")
+        streak_detector = astride_detect.Streak(
+            path,
+            remove_bkg="constant",
+            bkg_box_size=50,
+            contour_threshold=3.0,
+            min_points=15,
+            shape_cut=0.2,
+            area_cut=25.0,
+            radius_dev_cut=0.5,
+            connectivity_angle=3.0,
+            fully_connected="high",
+        )
+        streak_detector.detect()
+
+        mask = np.zeros_like(image_data, dtype=bool)
+        buffer_size = 5
+
+        if streak_detector.streaks and len(streak_detector.streaks) > 0:
+            logger.info("%d trainée(s) détectée(s).", len(streak_detector.streaks))
+            for streak in streak_detector.streaks:
+                x_coords = streak["x"].astype(int)
+                y_coords = streak["y"].astype(int)
+                for i in range(len(x_coords) - 1):
+                    x1, y1 = int(x_coords[i]), int(y_coords[i])
+                    x2, y2 = int(x_coords[i + 1]), int(y_coords[i + 1])
+                    dx = abs(x2 - x1)
+                    dy = abs(y2 - y1)
+                    sx = 1 if x1 < x2 else -1
+                    sy = 1 if y1 < y2 else -1
+                    err = dx - dy
+                    while True:
+                        for bx in range(-buffer_size, buffer_size + 1):
+                            for by in range(-buffer_size, buffer_size + 1):
+                                nx, ny = x1 + bx, y1 + by
+                                if 0 <= nx < mask.shape[1] and 0 <= ny < mask.shape[0]:
+                                    mask[ny, nx] = True
+                        if x1 == x2 and y1 == y2:
+                            break
+                        e2 = 2 * err
+                        if e2 > -dy:
+                            err -= dy
+                            x1 += sx
+                        if e2 < dx:
+                            err += dx
+                            y1 += sy
+        else:
+            logger.debug("Aucune trainée détectée (ASTRiDE).")
+
+        return mask
+    except Exception as e:
+        logger.warning("Détection trainées (ASTRiDE) : %s", e)
+        return empty
+    finally:
+        if cleanup_dir and Path(cleanup_dir).is_dir():
+            try:
+                shutil.rmtree(cleanup_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
+def build_photometry_bad_pixel_mask(
+    image_data: np.ndarray,
+    header: Optional[fits.Header] = None,
+    *,
+    use_saturation_and_cosmics: bool = True,
+    border_pixels: int = 0,
+    mask_satellite_trails: bool = False,
+    cosmic_ray_gain: Optional[float] = None,
+) -> np.ndarray:
+    """
+    Combine masques bordure + saturation/CR (+ trainées si demandé).
+    Retourne un tableau booléen même forme que ``image_data`` (2D), True = exclure.
+    """
+    shape = image_data.shape[:2]
+
+    def _as_bool_2d(arr: np.ndarray) -> np.ndarray:
+        a = np.asarray(arr)
+        if a.shape != shape:
+            if a.size == int(np.prod(shape)):
+                try:
+                    a = a.reshape(shape)
+                except Exception:
+                    return np.zeros(shape, dtype=bool)
+            else:
+                return np.zeros(shape, dtype=bool)
+        return a.astype(bool)
+
+    out = np.zeros(shape, dtype=bool)
+    if border_pixels and int(border_pixels) > 0:
+        out |= _as_bool_2d(make_border_mask(image_data, border=int(border_pixels)))
+    if use_saturation_and_cosmics:
+        out |= _as_bool_2d(
+            build_saturation_cosmic_ray_mask(
+                image_data, header, gain=cosmic_ray_gain
+            )
+        )
+    if mask_satellite_trails:
+        out |= _as_bool_2d(build_satellite_trail_mask(image_data, header))
+    return out
 
 
 class STDPipeWrapper:
@@ -1142,10 +1444,24 @@ class STDPipeWrapper:
             logger.error(f"Erreur lors de la détection de transitoires: {e}", exc_info=True)
             return None
     
-    def perform_photometry(self, image_path: str, sources: Table,
-                          catalog: str = 'gaia', mag_limit: float = 20.0,
-                          filter_name: str = 'G', photometry_method: str = 'aperture',
-                          fwhm: Optional[float] = None) -> Optional[Table]:
+    def perform_photometry(
+        self,
+        image_path: str,
+        sources: Table,
+        catalog: str = "gaia",
+        mag_limit: float = 20.0,
+        filter_name: str = "G",
+        photometry_method: str = "aperture",
+        fwhm: Optional[float] = None,
+        *,
+        use_npoap_transformation: bool = True,
+        npoap_obs_filter: Optional[str] = None,
+        use_artifact_mask: bool = True,
+        border_pixels: int = 0,
+        mask_satellite_trails: bool = False,
+        photometry_mask: Optional[np.ndarray] = None,
+        cosmic_ray_gain: Optional[float] = None,
+    ) -> Optional[Table]:
         """
         Effectue la photométrie des sources détectées et la calibre.
         
@@ -1167,6 +1483,23 @@ class STDPipeWrapper:
             Méthode de photométrie : 'aperture' ou 'psf'
         fwhm : float, optional
             FWHM estimé pour la photométrie PSF (nécessaire si photometry_method='psf')
+        use_npoap_transformation : bool, optional
+            Si True (défaut) et ``catalog='gaia'``, tente d'abord ``mag = a × m_inst + b``
+            avec ``load_latest_transformation_coefficient`` (priorité à la ligne **Coefficient médian**
+            du CSV paire si présente). Filtre : en-tête FITS ou ``npoap_obs_filter``.
+            Sinon repli sur le point zéro médian Gaia.
+        npoap_obs_filter : str, optional
+            Filtre observateur explicite (ex. ``G``, ``V``). Si vide, lecture en-tête FITS.
+        use_artifact_mask : bool, optional
+            Si True (défaut), masque saturation + rayons cosmiques (L.A.Cosmic via ``astroscrappy``).
+        border_pixels : int, optional
+            Largeur en pixels des bords à exclure (0 = désactivé).
+        mask_satellite_trails : bool, optional
+            Si True, ajoute un masque trainées via ASTRiDE (``astride``).
+        photometry_mask : ndarray, optional
+            Masque booléen 2D (True = exclure) fourni par l'appelant ; fusionné avec les masques ci-dessus.
+        cosmic_ray_gain : float, optional
+            Gain électronique forcé pour L.A.Cosmic ; si None, lecture ``GAIN`` de l'en-tête.
         
         Returns
         -------
@@ -1178,6 +1511,35 @@ class STDPipeWrapper:
             with fits.open(image_path) as hdul:
                 image_data = hdul[0].data.astype(float)
                 header = hdul[0].header
+
+            bad_mask = None
+            if (
+                photometry_mask is not None
+                or use_artifact_mask
+                or (border_pixels and int(border_pixels) > 0)
+                or mask_satellite_trails
+            ):
+                bad_mask = build_photometry_bad_pixel_mask(
+                    image_data,
+                    header,
+                    use_saturation_and_cosmics=use_artifact_mask,
+                    border_pixels=int(border_pixels or 0),
+                    mask_satellite_trails=bool(mask_satellite_trails),
+                    cosmic_ray_gain=cosmic_ray_gain,
+                )
+                if photometry_mask is not None:
+                    pm = np.asarray(photometry_mask, dtype=bool)
+                    if pm.shape != image_data.shape[:2]:
+                        if pm.size == int(np.prod(image_data.shape[:2])):
+                            pm = pm.reshape(image_data.shape[:2])
+                        else:
+                            logger.warning(
+                                "photometry_mask : forme incompatible (%s vs %s), ignoré.",
+                                pm.shape,
+                                image_data.shape[:2],
+                            )
+                            pm = np.zeros(image_data.shape[:2], dtype=bool)
+                    bad_mask = bad_mask | pm
             
             # Effectuer la photométrie selon la méthode choisie
             if photometry_method == 'psf':
@@ -1190,14 +1552,25 @@ class STDPipeWrapper:
             
             if photometry_method == 'psf':
                 # Photométrie PSF
-                sources_with_flux = self._perform_psf_photometry(image_data, sources, fwhm)
+                sources_with_flux = self._perform_psf_photometry(
+                    image_data, sources, fwhm, mask=bad_mask
+                )
             else:
                 # Photométrie d'ouverture (méthode par défaut)
-                sources_with_flux = self._perform_aperture_photometry(image_data, sources)
+                sources_with_flux = self._perform_aperture_photometry(
+                    image_data, sources, mask=bad_mask
+                )
             
             # Calibration photométrique
-            if catalog == 'gaia':
-                calibrated = self._calibrate_with_gaia(sources_with_flux, header, filter_name, mag_limit)
+            if catalog == "gaia":
+                calibrated = self._calibrate_with_gaia(
+                    sources_with_flux,
+                    header,
+                    filter_name,
+                    mag_limit,
+                    use_npoap_transformation=use_npoap_transformation,
+                    npoap_obs_filter=npoap_obs_filter,
+                )
             else:
                 # Utiliser STDPipe pour les autres catalogues
                 if stdpipe_photometry and hasattr(stdpipe_photometry, 'photometry'):
@@ -1216,8 +1589,13 @@ class STDPipeWrapper:
             logger.error(f"Erreur lors de la photométrie: {e}", exc_info=True)
             return None
     
-    def _perform_aperture_photometry(self, image_data: np.ndarray, sources: Table) -> Table:
-        """Effectue la photométrie d'ouverture."""
+    def _perform_aperture_photometry(
+        self,
+        image_data: np.ndarray,
+        sources: Table,
+        mask: Optional[np.ndarray] = None,
+    ) -> Table:
+        """Effectue la photométrie d'ouverture (``mask`` : True = pixels exclus, photutils)."""
         from photutils.aperture import CircularAperture, aperture_photometry
         
         if len(sources) == 0:
@@ -1234,7 +1612,7 @@ class STDPipeWrapper:
             return sources
         
         apertures = CircularAperture(positions, r=aper_radius)
-        phot = aperture_photometry(image_data, apertures)
+        phot = aperture_photometry(image_data, apertures, mask=mask)
         
         result = sources.copy()
         result['flux'] = phot['aperture_sum']
@@ -1242,7 +1620,13 @@ class STDPipeWrapper:
         
         return result
     
-    def _perform_psf_photometry(self, image_data: np.ndarray, sources: Table, fwhm: float) -> Table:
+    def _perform_psf_photometry(
+        self,
+        image_data: np.ndarray,
+        sources: Table,
+        fwhm: float,
+        mask: Optional[np.ndarray] = None,
+    ) -> Table:
         """Effectue la photométrie PSF."""
         if not PSF_PHOTOMETRY_AVAILABLE:
             raise ImportError("photutils.psf n'est pas disponible")
@@ -1273,8 +1657,14 @@ class STDPipeWrapper:
             fitshape=(int(2.5 * fwhm), int(2.5 * fwhm))
         )
         
-        # Effectuer la photométrie PSF
-        result_table = psf_phot(image_data, positions)
+        # Effectuer la photométrie PSF (masque optionnel selon version photutils)
+        try:
+            if mask is not None:
+                result_table = psf_phot(image_data, positions, mask=mask)
+            else:
+                result_table = psf_phot(image_data, positions)
+        except TypeError:
+            result_table = psf_phot(image_data, positions)
         
         # Créer une table de résultats avec les colonnes attendues
         result = sources.copy()
@@ -1284,31 +1674,115 @@ class STDPipeWrapper:
         else:
             # Fallback vers aperture photometry si PSF échoue
             logger.warning("PSF photometry échouée, utilisation de l'aperture photometry")
-            return self._perform_aperture_photometry(image_data, sources)
+            return self._perform_aperture_photometry(image_data, sources, mask=mask)
         
         return result
-    
-    def _calibrate_with_gaia(self, sources: Table, header: fits.Header,
-                             filter_name: str, mag_limit: float) -> Table:
+
+    def _try_npoap_transformation_calib(
+        self,
+        result: Table,
+        header: fits.Header,
+        *,
+        npoap_obs_filter: Optional[str] = None,
+    ) -> bool:
+        """
+        Applique ``mag ≈ a × m_inst + b`` avec les coefficients enregistrés NPOAP
+        (fichier paire / journal), si trouvés. Met à jour ``result`` en place.
+
+        Returns
+        -------
+        bool
+            True si la calibration NPOAP a été appliquée, False sinon (repli ZP à faire ailleurs).
+        """
+        try:
+            from core.transformation_coefficients import (
+                read_obs_filter_from_header,
+                ref_band_id_for_observer_filter,
+                load_latest_transformation_coefficient,
+            )
+        except ImportError as e:
+            logger.debug("Coefficients NPOAP indisponibles: %s", e)
+            return False
+
+        obs_f = (npoap_obs_filter or "").strip() or read_obs_filter_from_header(header)
+        if not (obs_f or "").strip():
+            logger.info(
+                "Calibration NPOAP : filtre instrument absent (en-tête FILTER / "
+                "saisie manuelle) — repli sur point zéro Gaia."
+            )
+            return False
+
+        ref_id = ref_band_id_for_observer_filter(obs_f)
+        pack = load_latest_transformation_coefficient(obs_f, ref_band_id=ref_id)
+        if pack is None:
+            logger.info(
+                "Calibration NPOAP : aucun coefficient pour filtre %r, ref_band_id=%r — repli ZP.",
+                obs_f,
+                ref_id,
+            )
+            return False
+
+        a, b, desc, mag_std = pack
+        a = float(a)
+        b = float(b)
+        if "flux" not in result.colnames or len(result) == 0:
+            return False
+        fl = np.asarray(result["flux"], dtype=float)
+        m_inst = -2.5 * np.log10(np.maximum(fl, 1e-300))
+        result["mag"] = a * m_inst + b
+        ferr = (
+            np.asarray(result["fluxerr"], dtype=float)
+            if "fluxerr" in result.colnames
+            else np.maximum(fl * 0.1, 1e-12)
+        )
+        dmi = 2.5 / np.log(10.0) * (ferr / np.maximum(fl, 1e-300))
+        sig = float(mag_std) if mag_std is not None and np.isfinite(mag_std) else 0.0
+        result["magerr"] = np.sqrt((np.abs(a) * dmi) ** 2 + sig**2)
+        result["zp"] = np.full(len(result), np.nan, dtype=float)
+        result["npoap_calibration"] = np.full(len(result), True, dtype=bool)
+        result["npoap_description"] = [str(desc)] * len(result)
+        if np.isfinite(sig) and sig > 0.0:
+            result["npoap_mag_std"] = np.full(len(result), sig, dtype=float)
+        if "catalog_mag" in result.colnames:
+            result.remove_column("catalog_mag")
+        result["calibration_mode"] = np.full(
+            len(result), "npoap_transformation", dtype="U64"
+        )
+        logger.info("Photométrie transitoire : calibration NPOAP (%s).", desc)
+        return True
+
+    def _calibrate_with_gaia(
+        self,
+        sources: Table,
+        header: fits.Header,
+        filter_name: str,
+        mag_limit: float,
+        *,
+        use_npoap_transformation: bool = True,
+        npoap_obs_filter: Optional[str] = None,
+    ) -> Table:
         """
         Calibre la photométrie avec Gaia eDR3.
         
         Supporte les filtres : 'G', 'G_Bp', 'G_Rp', 'U', 'B', 'V', 'R', 'I'
         """
+        if len(sources) == 0:
+            return sources
+
+        result = sources.copy()
+        if use_npoap_transformation and self._try_npoap_transformation_calib(
+            result, header, npoap_obs_filter=npoap_obs_filter
+        ):
+            return result
+
         if not GAIA_AVAILABLE:
             logger.error("astroquery n'est pas disponible pour requêter Gaia")
             return sources
-        
-        if len(sources) == 0:
+
+        if "ra" not in sources.colnames or "dec" not in sources.colnames:
+            logger.warning("Pas de coordonnées RA/Dec dans sources (ZP Gaia requis).")
             return sources
-        
-        # Extraire les coordonnées
-        if 'ra' not in sources.colnames or 'dec' not in sources.colnames:
-            logger.warning("Pas de coordonnées RA/Dec dans sources")
-            return sources
-        
-        result = sources.copy()
-        
+
         # Requêter Gaia eDR3 pour les étoiles de référence
         try:
             coords = SkyCoord(ra=sources['ra'], dec=sources['dec'], unit=(u.deg, u.deg))

@@ -7,6 +7,7 @@ import importlib
 
 import config
 from core.api_key_dialog import APIKeyDialog, API_KEY_PATH
+from gui.manual_help import add_manual_help_header_grid
 from config import OBSERVATORY, EQUIPMENT_OBSERVATION
 
 
@@ -59,9 +60,9 @@ class HomeTab(ttk.Frame):
         self.config_data = {
             "observatory": {
                 "name": OBSERVATORY.get("name", ""),
-                "latitude": OBSERVATORY.get("latitude", 0.0),
-                "longitude": OBSERVATORY.get("longitude", 0.0),
-                "elevation": OBSERVATORY.get("elevation", 0.0),
+                "latitude": float(OBSERVATORY.get("latitude", OBSERVATORY.get("lat", 0.0))),
+                "longitude": float(OBSERVATORY.get("longitude", OBSERVATORY.get("lon", 0.0))),
+                "elevation": float(OBSERVATORY.get("elevation", OBSERVATORY.get("elev", 0.0))),
                 "timezone": OBSERVATORY.get("timezone", "UTC"),
             },
             "equipment": {
@@ -71,6 +72,12 @@ class HomeTab(ttk.Frame):
                 "sensor_height_mm": eq.get("sensor_height_mm", ""),
                 "binning": eq.get("binning", 1),  # 1, 2, 3 ou 4 (1x1, 2x2, 3x3, 4x4)
                 "pixel_size_um": eq.get("pixel_size_um", ""),
+                "camera_gain_e_per_adu": eq.get("camera_gain_e_per_adu"),
+                "camera_readnoise_e": eq.get("camera_readnoise_e"),
+                "camera_dark_e_per_s": eq.get("camera_dark_e_per_s"),
+                "camera_linear_limit_adu": eq.get("camera_linear_limit_adu"),
+                "camera_saturation_adu": eq.get("camera_saturation_adu"),
+                "shobs_camera_profile_id": eq.get("shobs_camera_profile_id"),
             },
             "astrometry_api_key": "",
             "affiliations": [],  # Liste de dicts: [{"text": "...", "selected": bool}]
@@ -96,6 +103,8 @@ class HomeTab(ttk.Frame):
 
             except Exception as e:
                 messagebox.showwarning("Config", f"Erreur lecture config.json : {e}")
+
+        config.refresh_camera_equipment_from_config_json()
 
     def save_config(self):
         """
@@ -138,6 +147,24 @@ class HomeTab(ttk.Frame):
         # Sauvegarder les affiliations
         self.config_data["affiliations"] = self.affiliations
 
+        # Préserver le bloc onsky (Sky SHOBS) déjà présent sur disque / en mémoire
+        try:
+            config.refresh_onsky_from_config_json()
+            onsky_mem = {
+                k: v
+                for k, v in config.ONSKY_CALIBRATION.items()
+                if v is not None and v != {}
+            }
+            if onsky_mem:
+                self.config_data["onsky"] = onsky_mem
+            elif "onsky" not in self.config_data and self.config_file.exists():
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    prev = json.load(f)
+                if isinstance(prev.get("onsky"), dict):
+                    self.config_data["onsky"] = prev["onsky"]
+        except Exception:
+            pass
+
         try:
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(self.config_data, f, indent=4)
@@ -167,6 +194,7 @@ class HomeTab(ttk.Frame):
             # Met à jour config.AFFILIATIONS (en mémoire)
             config.AFFILIATIONS = self.config_data.get("affiliations", [])
             importlib.reload(config)
+            config.refresh_camera_equipment_from_config_json()
 
             messagebox.showinfo("Succès", "Configuration sauvegardée.")
         except Exception as e:
@@ -176,17 +204,18 @@ class HomeTab(ttk.Frame):
     # GUI
     # ------------------------------------------------------------------
     def create_widgets(self):
+        add_manual_help_header_grid(self, "2-accueil", columnspan=2, row=0)
         # Frame principal avec deux colonnes
         left_frame = ttk.Frame(self)
-        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
         
         right_frame = ttk.Frame(self)
-        right_frame.grid(row=0, column=1, sticky="nsew")
+        right_frame.grid(row=1, column=1, sticky="nsew")
         
         # Configuration des colonnes pour l'expansion
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
         
         # ========== COLONNE GAUCHE ==========
         # Observatoire
@@ -259,6 +288,38 @@ class HomeTab(ttk.Frame):
         ttk.Label(equip_lf, text="Échelle pixel (″/px):").grid(row=row_fov + 1, column=0, sticky="e", padx=(0, 5), pady=2)
         self.pixel_scale_label = ttk.Label(equip_lf, text="—", foreground="gray")
         self.pixel_scale_label.grid(row=row_fov + 1, column=1, sticky="w", pady=2)
+
+        row_cam = row_fov + 2
+        ttk.Label(equip_lf, text="Calibration caméra:").grid(
+            row=row_cam, column=0, sticky="ne", padx=(0, 5), pady=2
+        )
+        self.camera_calib_label = ttk.Label(
+            equip_lf, text="—", foreground="gray", wraplength=280, justify="left"
+        )
+        self.camera_calib_label.grid(row=row_cam, column=1, sticky="w", pady=2)
+
+        shobs_btns = ttk.Frame(equip_lf)
+        shobs_btns.grid(row=row_cam + 1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Button(
+            shobs_btns,
+            text="SHOBS-FLUX…",
+            command=self.launch_shobs_flux,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            shobs_btns,
+            text="Importer profil caméra…",
+            command=self.import_shobs_camera_profile,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            shobs_btns,
+            text="Importer profil système…",
+            command=self.import_shobs_system_profile,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            shobs_btns,
+            text="Historique / Rapport…",
+            command=self.open_shobs_history,
+        ).pack(side="left")
 
         # Clé API
         ttk.Separator(left_frame, orient="horizontal").grid(
@@ -463,6 +524,82 @@ class HomeTab(ttk.Frame):
             self.fov_label.config(text="— ° × — °")
             self.pixel_scale_label.config(text="—")
 
+    def _refresh_camera_calib_label(self) -> None:
+        """Affiche gain / RN / dark / limite linéaire / on-sky issus de config."""
+        if not hasattr(self, "camera_calib_label"):
+            return
+        config.refresh_camera_equipment_from_config_json()
+        config.refresh_onsky_from_config_json()
+        eq = config.EQUIPMENT_OBSERVATION
+        parts = []
+        g = eq.get("camera_gain_e_per_adu")
+        rn = eq.get("camera_readnoise_e")
+        dark = eq.get("camera_dark_e_per_s")
+        lin = eq.get("camera_linear_limit_adu")
+        sat = eq.get("camera_saturation_adu")
+        pid = eq.get("shobs_camera_profile_id")
+        if g is not None:
+            parts.append(f"gain {float(g):.4g} e-/ADU")
+        if rn is not None:
+            parts.append(f"RN {float(rn):.3g} e-")
+        if dark is not None:
+            parts.append(f"dark {float(dark):.3g} e-/s")
+        if lin is not None:
+            parts.append(f"lin≤{float(lin):.0f} ADU")
+        if sat is not None:
+            parts.append(f"sat {float(sat):.0f} ADU")
+        if pid:
+            parts.append(f"[{pid}]")
+        onsky = config.ONSKY_CALIBRATION
+        if onsky.get("zero_point") is not None:
+            parts.append(f"ZP {float(onsky['zero_point']):.3g}")
+        if onsky.get("extinction_k") is not None:
+            parts.append(f"k {float(onsky['extinction_k']):.3g}")
+        if onsky.get("seeing_fwhm_arcsec") is not None:
+            parts.append(f"seeing {float(onsky['seeing_fwhm_arcsec']):.2g}\"")
+        text = " · ".join(parts) if parts else "Non défini (PTC / Sky / import SHOBS-FLUX)"
+        self.camera_calib_label.config(text=text)
+
+    def launch_shobs_flux(self) -> None:
+        from gui.shobs_flux_dialogs import launch_shobs_flux_ui
+
+        launch_shobs_flux_ui(self)
+
+    def import_shobs_camera_profile(self) -> None:
+        from gui.shobs_flux_dialogs import prompt_import_camera_profile
+
+        def _on_imported(eq: dict) -> None:
+            self.config_data.setdefault("equipment", {}).update(eq)
+            if "binning" in eq:
+                try:
+                    b = int(eq["binning"])
+                    self.config_data["equipment"]["binning"] = b
+                    if getattr(self, "binning_combo", None):
+                        self.binning_combo.set(f"{b}x{b}")
+                except (TypeError, ValueError):
+                    pass
+            self._refresh_camera_calib_label()
+
+        prompt_import_camera_profile(
+            self,
+            telescope_name=str(self.config_data.get("observatory", {}).get("name") or ""),
+            on_imported=_on_imported,
+        )
+
+    def import_shobs_system_profile(self) -> None:
+        from gui.shobs_flux_dialogs import prompt_import_system_profile
+
+        def _on_imported(eq: dict) -> None:
+            self.config_data["onsky"] = dict(eq)
+            self._refresh_camera_calib_label()
+
+        prompt_import_system_profile(self, on_imported=_on_imported)
+
+    def open_shobs_history(self) -> None:
+        from gui.shobs_history_dialog import open_shobs_history
+
+        open_shobs_history(self)
+
     def load_values(self):
         """
         Remplit les champs GUI à partir de self.config_data.
@@ -510,6 +647,7 @@ class HomeTab(ttk.Frame):
                 b = 1
             self.binning_combo.set(f"{b}x{b}")
         self._update_equipment_computed()
+        self._refresh_camera_calib_label()
         
         # Charger les affiliations
         self.affiliations = self.config_data.get("affiliations", [])

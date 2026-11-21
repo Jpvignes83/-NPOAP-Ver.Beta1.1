@@ -1,7 +1,8 @@
 # gui/catalogues_tab.py
 """
 Onglet unifié pour extraire des données de catalogues astronomiques.
-Regroupe les outils d'extraction pour : étoiles, étoiles binaires, exoplanètes.
+Regroupe les outils d'extraction pour : étoiles, étoiles binaires.
+(MAST / exoplanètes : voir Photométrie Exoplanètes, panneau droit → A. Catalogues MAST.)
 """
 
 import logging
@@ -20,6 +21,8 @@ from astropy import units as u
 from astropy.io import fits
 from astropy.table import Table, vstack
 import numpy as np
+
+from gui.manual_help import add_manual_help_header
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +59,10 @@ except ImportError as e:
 class CataloguesTab(ttk.Frame):
     """
     Onglet unifié pour l'extraction de catalogues astronomiques.
-    Organisé par type d'objet : étoiles, étoiles binaires, exoplanètes.
+    Organisé par type d'objet : étoiles, étoiles binaires.
     """
     
-    def __init__(self, parent):
+    def __init__(self, parent, exoplanets_only=False):
         super().__init__(parent, padding=10)
         
         self.extractor = None
@@ -69,11 +72,31 @@ class CataloguesTab(ttk.Frame):
         # Tous les répertoires de catalogues sont choisis par l'utilisateur
         # Aucun catalogue n'est stocké dans .NPOAP
         
+        if exoplanets_only:
+            self.pack(fill=tk.BOTH, expand=True)
+            try:
+                self.create_exoplanets_tab(embed_parent=self)
+            except Exception as e:
+                logger.error(
+                    "Erreur création panneau Exoplanètes (mode intégré) : %s",
+                    e,
+                    exc_info=True,
+                )
+                ttk.Label(
+                    self,
+                    text=f"Erreur interface Exoplanètes / MAST : {e}",
+                    foreground="red",
+                    wraplength=560,
+                    justify="left",
+                ).pack(padx=10, pady=10, anchor="w")
+            return
+        
         self.create_widgets()
     
     def create_widgets(self):
         """Crée l'interface utilisateur avec Notebook interne organisé par type d'objet."""
-        
+        add_manual_help_header(self, "onglet-catalogues")
+
         # En-tête
         header_frame = ttk.Frame(self)
         header_frame.pack(fill="x", pady=(0, 10))
@@ -87,7 +110,7 @@ class CataloguesTab(ttk.Frame):
         
         subtitle_label = ttk.Label(
             header_frame,
-            text="Outils d'extraction pour étoiles, étoiles binaires et exoplanètes",
+            text="Outils d'extraction pour étoiles et étoiles binaires (MAST : Photométrie Exoplanètes, panneau droit)",
             font=("Helvetica", 9),
             foreground="gray"
         )
@@ -97,19 +120,17 @@ class CataloguesTab(ttk.Frame):
         self.inner_notebook = ttk.Notebook(self)
         self.inner_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Créer les onglets par type d'objet (la zone logs est créée dans l'onglet Étoiles)
+        # Zone logs créée dans l'onglet Étoiles
         try:
-            self.create_stars_tab()  # Onglet Étoiles
+            self.create_stars_tab()
         except Exception as e:
             logger.error(f"Erreur création onglet Étoiles : {e}", exc_info=True)
         
-        try:
-            self.create_exoplanets_tab()  # Onglet Exoplanètes
-        except Exception as e:
-            logger.error(f"Erreur création onglet Exoplanètes : {e}", exc_info=True)
-        
-        # Message initial
-        self.log_message("Interface d'extraction de catalogues prête.\nSélectionnez un type d'objet dans les onglets ci-dessus.", "info")
+        self.log_message(
+            "Interface d'extraction de catalogues prête.\n"
+            "Téléchargement MAST / courbes exoplanètes : Photométrie Exoplanètes (panneau droit) → A. Catalogues MAST.",
+            "info",
+        )
     
     def init_catalogs(self):
         """Initialise la liste des catalogues disponibles."""
@@ -637,10 +658,13 @@ class CataloguesTab(ttk.Frame):
     def _tess_lc_fits_script(self) -> Path:
         return self._npoap_project_root() / "scripts" / "tess_lc_fits_to_txt.py"
 
-    def create_exoplanets_tab(self):
-        """Onglet Exoplanètes : MAST + TESS (FITS édité → LcTools .txt)."""
-        exoplanets_frame = ttk.Frame(self.inner_notebook, padding=10)
-        self.inner_notebook.add(exoplanets_frame, text="🔭 Exoplanètes")
+    def create_exoplanets_tab(self, embed_parent):
+        """Panneau MAST + TESS (FITS édité → LcTools .txt), intégré dans ``embed_parent``.
+
+        Utilisé depuis le panneau droit de Photométrie Exoplanètes (sous-onglet A. Catalogues MAST), pas depuis l’onglet Catalogues général.
+        """
+        exoplanets_frame = ttk.Frame(embed_parent, padding=10)
+        exoplanets_frame.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(
             exoplanets_frame,
@@ -2625,8 +2649,7 @@ class CataloguesTab(ttk.Frame):
                 all_pairs, physical_pairs = calculator.analyze_gaia_csv_file(
                     gaia_path,
                     max_angular_separation_arcsec=max_angular_sep,
-                    min_angular_separation_arcsec=0.5,
-                    threshold_pc=threshold_pc
+                    threshold_pc=threshold_pc,
                 )
             except Exception as e:
                 error_msg = f"Erreur lors de l'analyse du fichier Gaia : {e}"

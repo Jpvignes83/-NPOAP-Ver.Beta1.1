@@ -16,8 +16,8 @@ Ce guide décrit comment installer NPOAP automatiquement sur Windows 10/11.
 2. **Extrayez l'archive** dans un dossier de votre choix
 3. **Clic droit sur `installation.bat`** → **"Exécuter en tant qu'administrateur"**
 4. **Acceptez** l'accord d'utilisation, puis **indiquez un chemin d'installation absolu** (ex. `C:\Astro\NPOAP`). Aucun dossier par défaut n'est imposé.
-5. **Suivez les étapes** affichées (Python, Miniconda, environnement `astroenv`, dépendances `requirements.txt`, copie des fichiers, etc.)
-6. À la fin, la console liste les **scripts optionnels** ; le fichier **`LISTE_INSTALL_OPTIONNELS.txt`** (dans le même dossier que NPOAP) reprend la même liste.
+5. **Suivez les étapes** affichées (Miniconda, environnement `astroenv` avec Python 3.11, dépendances `requirements.txt`, copie des fichiers, etc.)
+6. À la fin, la console liste les **scripts optionnels** ; vous pouvez les lancer un par un, ou exécuter **`install_optionnels.bat`** pour enchaîner automatiquement toute la séquence. Le fichier **`LISTE_INSTALL_OPTIONNELS.txt`** (dans le même dossier que NPOAP) reprend la même liste.
 
 ## Ce que fait le script `installation.bat`
 
@@ -28,34 +28,59 @@ Le script automatise le **cœur** de l'installation sur Windows. Les outils lour
 1. **Accord d'utilisation** puis vérification des privilèges administrateur
 2. **Sélection du dossier d'installation** (chemin absolu au choix de l'utilisateur)
 3. **Vérifications système** : architecture (x64 recommandé) et **droits d'écriture** dans le dossier choisi
-4. **Installation de Python 3.11** (facultatif si vous conservez une installation existante)
+4. **Rappel** : l'interpréteur utilisé par NPOAP est celui de l'environnement Conda **`astroenv`** (Python 3.11) ; **aucun** installateur séparé depuis python.org n'est lancé par le script.
 5. **Installation de Miniconda** (ou réutilisation de Conda déjà présent)
-6. **Création ou réutilisation** de l'environnement Conda **`astroenv`**
-7. **Installation des dépendances Python** depuis `requirements.txt` (via `pip`)
+6. **Création ou réutilisation** de l'environnement Conda **`astroenv`** avec `python=3.11`
+7. **Installation des dépendances Python** depuis `requirements.txt` (via `pip` dans `astroenv`), incluant notamment **wotan** pour le détrendage optionnel des segments de transit lors de l’affinage des mid-times (Analyse de données) ; voir `docs/MANUEL_UTILISATEUR.md` §7.1 et `docs/ACKNOWLEDGEMENTS.md`.
 8. **Copie des fichiers NPOAP** vers le dossier d'installation
-9. **Création de `LANCER_NPOAP.bat`** dans ce dossier
+9. **Copie de `LANCEMENT.bat`** (script de lancement) dans ce dossier
 10. **Test** si `test_installation.py` est présent
 11. **Protection en lecture seule** des fichiers sources (comportement inchangé si `protect_files.bat` est utilisé)
 
-KBMOD n'est **pas** dans `requirements.txt` pour Windows ; pour le Synthetic Tracking sous Linux/WSL, voir `docs/INSTALL_KBMOD_WSL.md` et `install_kbmod_wsl.bat`.
+KBMOD n'est **pas** dans `requirements.txt` pour Windows ; pour le Synthetic Tracking sous Linux/WSL, lancez **`install_kbmod_wsl.bat`** ou suivez `docs/INSTALL_KBMOD_WSL.md`.
 
 ## Composants optionnels (scripts séparés)
 
-Ces actions se font **après** l'installation principale, depuis le dossier NPOAP (copie d'installation ou dossier du déploiement), en double-cliquant ou depuis `cmd` :
+Ces actions se font **après** l'installation principale, depuis le dossier NPOAP (copie d'installation ou dossier du déploiement), en double-cliquant ou depuis `cmd`.
+
+Pour tout installer automatiquement en une fois :
+
+```cmd
+install_optionnels.bat
+```
+
+Sinon, vous pouvez aussi lancer les scripts individuellement :
 
 | Script | Usage |
 |--------|--------|
 | `install_msvc_build_tools.bat` | Ouvre la page **Visual C++ Build Tools** (MSVC). Utile si l'installation ou la compilation de paquets comme **PHOEBE2** échoue faute de toolchain C++. |
 | `install_cmake.bat` | Aide à installer **CMake** (téléchargement officiel ou rappel `winget`). Requis pour certaines compilations (ex. KBMOD sous WSL/Linux). |
 | `install_wsl.bat` | Lance `wsl --install` (peut demander un **redémarrage**). |
-| `install_ubuntu_wsl.bat` | Ajoute la distribution **Ubuntu** dans WSL (`wsl --install -d Ubuntu`). |
-| `install_astrometry_wsl.bat` | Installe **astrometry.net** dans la distro WSL par défaut (`apt-get`). |
-| `install_kbmod_wsl.bat` | Ouvre la documentation **KBMOD** et les pistes d'installation sous WSL/Linux. |
-| `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat` | Lance **Prospector** via le script PowerShell du même nom (`.ps1`). |
+| `install_ubuntu_wsl_very_lite.bat` | **Recommandé** : importe **Ubuntu Base** (~29 Mo) comme `Ubuntu-NPOAP-Lite` puis installe uniquement les paquets stricts (toolchain, gfortran, astrometry.net sans indexs). Voir `docs/WSL_VERY_LITE.md`. |
+| `install_ubuntu_wsl.bat` | Alternative lourde : Ubuntu Microsoft Store (`wsl --install -d Ubuntu`). |
+| `install_astrometry_wsl.bat` | Installe **astrometry.net** dans la distro WSL par défaut (`apt-get`). Déjà inclus dans le profil `full` de very_Lite. |
+| `install_kbmod_wsl.bat` | Installe **KBMOD** sous WSL via `scripts/install_kbmod_wsl.sh` (voir aussi `docs/INSTALL_KBMOD_WSL.md`). |
+| `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat` | Installe **Prospector** (astro-prospector) dans l’environnement Conda **`astroenv`** sous Windows : appelle le script PowerShell ci-dessous. |
+| `INSTALLER_PROSPECTOR_COMPLET_WINDOWS.ps1` | Même installation que le `.bat`, avec options (`-InstallFSPS`, `-CondaEnv`, etc.). Le `.bat` est un lanceur pratique ; le `.ps1` est le script réel. |
+| `Installation_fsps/prospector.bat` | Lance sous **WSL2** le script Linux `Installation_fsps/install_prospector_wsl.sh` : **venv dédié** dans WSL, **gfortran**, tentative d’installation complète incluant **fsps** (souvent plus simple que sous Windows natif). **Indépendant** de Conda Windows : NPOAP continue d’utiliser `astroenv` pour l’interface ; cette voie sert surtout à un environnement Prospector/FSPS sous Linux. |
 
 La liste courte est aussi dans **`LISTE_INSTALL_OPTIONNELS.txt`**.
 
-**Ordre usuel pour l'astrométrie locale** : `install_wsl.bat` → redémarrage si Windows le demande → `install_ubuntu_wsl.bat` → configuration du compte Ubuntu → `install_astrometry_wsl.bat`.
+### Cosmologie SNe (sncosmo)
+
+Le module **sncosmo** (SALT2/SALT3) est désormais inclus dans l’installation initiale via **`requirements.txt`**.
+
+Les filtres **Gaia G, G_Bp, G_Rp** sont mappés vers les bandes sncosmo `gaia::g`, `gaia::gbp`, `gaia::grp`. Le premier lancement peut télécharger les surfaces de modèle SALT (accès réseau).
+
+### Prospector / FSPS : faut-il encore le `.bat` et le `.ps1` Windows ?
+
+**Oui**, si vous voulez **Prospector dans le même Python que NPOAP** (`conda activate astroenv` → `python main.py`). C’est le cas le plus courant : exécutez **`INSTALLER_PROSPECTOR_COMPLET_WINDOWS.bat`** (ou le `.ps1` à la main). Sans **gfortran**, la compilation de **fsps** échoue souvent sous Windows : le script bascule alors sur **`pip install … --no-deps`** et des **fichiers stub** sous `SPS_HOME` ; Prospector reste utilisable pour une grande partie des fonctions.
+
+Le dossier **`Installation_fsps/`** est une **alternative** pour un outillage **Prospector + FSPS** complet dans **WSL**, sans remplacer l’installateur Windows pour l’application NPOAP. Certaines livraisons ZIP placent `prospector.bat` et `install_prospector_wsl.sh` à la **racine** du dossier : même usage, en gardant les deux fichiers au même endroit.
+
+Voir aussi **`docs/MANUEL_INSTALLATION.md`** (section Prospector) et **`docs/PROTOCOLE_INSTALLATION_PROSPECTOR_WINDOWS.md`**.
+
+**Ordre usuel pour l'astrometrie locale** : `install_wsl.bat` -> redemarrage si Windows le demande -> `install_ubuntu_wsl_very_lite.bat` (ou `install_ubuntu_wsl.bat` si Ubuntu Store) -> `install_astrometry_wsl.bat` seulement si profil `core` / distro sans solve-field.
 
 Sans WSL, vous pouvez utiliser **Astrometry.net en ligne** (NOVA, clé API) selon la configuration de NPOAP.
 
@@ -67,7 +92,7 @@ Si le script d'installation automatique échoue, suivez **`docs/MANUEL_INSTALLAT
 
 ### Lancer NPOAP
 
-1. **Double-cliquez sur `LANCER_NPOAP.bat`** dans le dossier d'installation
+1. **Double-cliquez sur `LANCEMENT.bat`** dans le dossier d'installation
 
 OU
 
@@ -115,7 +140,7 @@ sudo apt-get install -y astrometry.net
 
 - Fermez et rouvrez le terminal
 - Ou : `conda init cmd.exe` puis nouveau terminal  
-- Pour une session `cmd` sans init : `call "...\miniconda3\Scripts\activate.bat" astroenv` (comme dans `LANCER_NPOAP.bat`)
+- Pour une session `cmd` sans init : `call "...\miniconda3\Scripts\activate.bat" astroenv` (comme dans `LANCEMENT.bat`)
 
 ### Erreur lors de l'installation ou de l'utilisation de PHOEBE2
 

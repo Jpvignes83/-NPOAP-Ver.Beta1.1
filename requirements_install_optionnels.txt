@@ -1,0 +1,51 @@
+# -*- coding: utf-8 -*-
+# NPOAP — Profil pip unifié pour install_optionnels.bat
+#
+# Regroupe notamment :
+#   - PHOEBE2 (étoiles binaires) — onglet Étoiles binaires
+#   - rebound + ultranest — N-body / nested sampling (data_analysis, core/nbody_simulation)
+#   - SNe Ia (sncosmo) — onglet Photométrie transitoires
+#   - SORA (sora-astro) — occultations (déjà dans requirements_install_core si install principal)
+#   - STDPipe + scikit-learn + celerite2 (GP, etc.)
+#
+# Installation (environnement astroenv ou venv NPOAP) :
+#   pip install -r requirements_install_optionnels.txt
+#
+# PHOEBE2 sous Windows : parfois Microsoft Visual C++ Build Tools
+# (install_msvc_build_tools.bat, docs/MANUEL_INSTALLATION.md).
+# Si pip annonce « Defaulting to user installation », voir
+# requirements_install_core / notes projet.
+#
+# === PHOEBE2 ===
+phoebe>=2.4.22,<2.5
+
+# === N-body + nested sampling (optionnel, wheels pip sous Windows en général) ===
+rebound>=4.0
+ultranest>=4.0
+
+# === Workflow ExoPlanetPie natif (onglet Photométrie Exoplanètes — batman + ultranest + ExoTETHyS) ===
+# batman-package : modèle de transit (core/exoplanetpie_pipeline.py).
+# ultranest est déjà fourni juste au-dessus ; exotethys / exoclock / lightkurve sont dans le profil principal.
+batman-package>=2.4.9
+
+# === SORA (occultations) — même contrainte que le cœur ; pip « already satisfied » si déjà installé ===
+sora-astro>=0.3.2
+
+# === Cosmologie SNe (SALT2/SALT3, cache modèles au 1er usage) ===
+sncosmo>=2.10,<3
+iminuit>=2.0
+
+# === VizieR FOV (visualisation réduction) : client CDS (prioritaire) + repli astroquery ===
+# git+https://github.com/cds-astro/cds.cdsclient.git
+
+# === IMCCE SkyBoT (système solaire, surcouches visualisation) : astroquery.imcce / solarsystem.imcce ===
+# Version de dev ex. v0.1.dev305+gd1f6e995f : construire depuis le dépôt astropy/astroquery, p.ex.
+#   pip install "git+https://github.com/astropy/astroquery.git@d1f6e995f"
+# Les versions publiées récentes (ex. >=0.4.11) exposent en général le même module.
+
+# === STDPipe + processus gaussiens (celerite2) ===
+# pkg_resources requis par certaines versions de stdpipe
+setuptools>=65,<81
+stdpipe
+scikit-learn
+celerite2

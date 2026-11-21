@@ -1,0 +1,1631 @@
+"""On-sky characterization (milestone 4): what the telescope + camera + sky do, learned from ordinary nights.
+
+INPUT. Every night comes in as an ON-SKY LOG (format "shobs-onsky-log", one JSON file per reduction in the SHOBS data
+folder's onsky/ folder). SHOBS-P 2.2.19.1 and later write one after every reduction; FLUX's own "folder of lights" run
+(sky_folder.py) writes the same kind of file, so both paths are learned from in exactly the same way. Each log is
+turned into a Dataset (load_dataset): fluxes become electrons per second with the camera profile's measured gain for
+the band's color (header EGAIN when there is no profile), pixels become arcseconds.
+
+ONE NIGHT (analyse). Per frame and catalogued star: zero point = catalog mag + 2.5 log10(e⁻/s). FLUX ignores the
+reduction's comp/check roles and uses every catalogued star (the target is always left out: it is usually the
+variable). Stars are set aside, with the reason, when they are saturated (raw peak at or above the linear limit),
+when their catalog magnitude disagrees with the rest (offset from the ensemble beyond 0.15 mag and 4 robust sigma: a
+wrong catalog value or a blend) or when they vary (their own scatter more than three times the ensemble's). The
+frames' zero points are fitted against airmass (3-sigma clipping): ZP(X) = ZP1 − k (X − 1).
+  Photometric?  The residuals binned in 10-minute bins must stay within 0.025 mag rms (thin cloud or haze moves
+                them; photon noise and scintillation average out in the bins).
+  Extinction k  only from a photometric night with an airmass span of at least 0.25 and a physical slope (0–1).
+                Otherwise ZP1 uses the profile's measured k, or a typical value for the band (labelled).
+  Seeing        FWHM in arcsec per frame (median for the night). A night whose median is over 7″, or more than
+                2.2× the best in-focus run that night, is DEFOCUSED; when the same night has an in-focus run, the
+                defocus is keyed by the focuser offset ("+125 steps").
+  Sky           mag/arcsec² from each frame's sky level and its own zero point (median), with the Moon's
+                illuminated fraction at mid-night.
+  Scintillation Young's C_Y (modified Young approximation, Osborn et al. 2015, as SHOBS-P uses it) from the
+                frame-to-frame scatter of each star against the others, after taking out photon, sky and read noise.
+                Needs the telescope aperture and the site elevation (typed on the Sky page; the site is never stored
+                in a profile).
+  Cadence       median time between frames minus the exposure = the time between frames (gaps and flips left out).
+                It holds any delay set in the capture software, which the headers do not record; so across nights
+                the profile's overhead is the LOWEST run's (a delay only adds).
+
+LEARNING (combine). Only the newest log of each night + target + band counts (a re-run replaces the first). Nights
+are combined per band: zero point and extinction from photometric nights only, each night once, 3-sigma clipped
+across nights (a night that disagrees is set aside, not averaged in); seeing in focus and per defocus key; sky from
+the darkest (Moon under 25 % lit) nights when there are any; C_Y as the median; the overhead as the lowest run's. The result is written
+into the system profile (format v1, shobs_profile.py) by apply_to_profile, after changes_for shows what changes.
+
+Standard library + numpy (+ astropy for the Moon, optional)."""
+from __future__ import annotations
+
+import copy
+import math
+import os
+import re
+from dataclasses import dataclass, field
+
+import numpy as np
+
+import shobs_profile as sp
+
+# ---- bands ---------------------------------------------------------------------------------------------------------
+
+# the catalog band each observing band is calibrated against (SHOBS-P's codes; OSC channels TG/TR/TB, clear CV)
+BAND_CATALOG = {"TG": "V", "V": "V", "CV": "V", "TB": "B", "B": "B", "TR": "R", "R": "R", "I": "I",
+                "SG": "SG", "SR": "SR", "SI": "SI", "SZ": "SZ", "SU": "SU"}
+BAND_WORDS = {"TG": "green (TG)", "TB": "blue (TB)", "TR": "red (TR)", "CV": "clear (CV)", "V": "V", "B": "B",
+              "R": "R", "I": "I", "SG": "g′", "SR": "r′", "SI": "i′", "SZ": "z′", "SU": "u′"}
+# typical extinction (mag/airmass) at a low site, used only until the night measures its own (labelled "typical")
+TYPICAL_K = {"B": 0.30, "V": 0.20, "R": 0.13, "I": 0.08, "SU": 0.55, "SG": 0.20, "SR": 0.12, "SI": 0.08, "SZ": 0.06}
+# the Bayer color a band is measured in, and how many raw pixels of that color one 2×2 cell holds
+BAND_COLOR = {"TG": ("G", 2), "TR": ("R", 1), "TB": ("B", 1), "CV": ("L", 4)}
+DEBAYER_COLOR = {"green": ("G", 2), "red": ("R", 1), "blue": ("B", 1), "luminance": ("L", 4)}
+
+# ---- the rules (numbers named once, quoted in the findings) ----------------------------------------------------------
+LINEAR_GUESS_ADU = 0.8 * 65535  # when no camera profile gives a linear limit
+SAT_FRACTION = 0.2            # a star saturated in more than this fraction of frames is set aside
+CAT_OFFSET_MAG = 0.15         # catalog disagreement: beyond this AND beyond CAT_OFFSET_SIGMA robust sigma
+CAT_OFFSET_SIGMA = 4.0
+VARY_FACTOR = 3.0             # a star whose own scatter is this many times the ensemble's varies
+MIN_STARS = 2                 # catalogued stars a night needs for a zero point
+MIN_FRAMES = 10               # frames a night needs
+BIN_DAYS = 10.0 / 1440.0      # 10-minute bins for the photometric test
+PHOT_BIN_RMS = 0.025          # binned residual rms (mag) a photometric night stays within
+MIN_BINS = 3                  # a night needs this many bins before it can be called photometric
+PHOT_BIN_RANGE = 0.05         # and the lowest to the highest 10-minute bin (mag): haze coming or going
+TREND_MAG = 0.03              # a steady climb or fall of the zero point across the night this big makes it MARGINAL
+K_MIN_SPAN = 0.25             # airmass span a night needs to measure extinction
+K_RANGE = (0.0, 1.0)          # a physical extinction coefficient
+DEFOCUS_ARCSEC = 7.0          # a night's median FWHM above this is defocused
+DEFOCUS_RATIO = 2.2           # or this many times the best in-focus run the same night
+DARK_MOON = 0.25              # Moon illuminated fraction below which a night counts as dark for the sky
+SCALE_HEIGHT_M = 8000.0       # Osborn et al. 2015
+SCINT_MIN_FRACTION = 0.5      # a star informs C_Y only when scintillation should be at least this share of its variance
+CLIP_SIGMA = 3.0              # across nights (the profile's learning rule)
+ZP_FLOOR = 0.01               # mag: the least uncertainty one night's zero point is given
+MAG = 2.5 / math.log(10.0)    # 1.0857: relative flux error → magnitudes
+
+
+class OnSkyError(Exception):
+    """A log or folder FLUX cannot learn from (the message is a plain sentence)."""
+
+
+class OnSkyNewerError(OnSkyError):
+    """A log written by a NEWER SHOBS-P (a format version this FLUX does not read yet): the file is fine, FLUX is
+    behind. Leave it where it is and update SHOBS-FLUX."""
+
+
+NEWER_WORDS = "written by a newer SHOBS-P"     # how a newer-format log is named on the Sky page
+
+# what the electron scale of a log rests on (Dataset.scale)
+SCALE_LOG = "log"            # format 2: SHOBS-P wrote electrons per unit at each star (gain, binning, flat in)
+SCALE_LOG_LOWER = "log-lower"  # format 2, but from the sky's own noise (no EGAIN): a lower limit (too few electrons)
+SCALE_LOG_LUM = "log-lum"    # format 2, clear (CV) luminance: SHOBS-P's value is the photon-noise equivalent of the
+                             # four flat-divided Bayer pixels (right for noise; ~0.1 mag too few electrons for a ZP)
+SCALE_CAMERA = "camera"      # worked out here from the gain: format 1 (or a format-2 log with no gain): the master
+                             # flat's factor is NOT in it, so its zero point can be ~0.4 mag too faint on an OSC
+SCALE_ADU_SUM = "adu-sum"    # a FLUX folder run: sums of raw ADU, one ADU = gain electrons (exact)
+SCALE_EXACT = (SCALE_LOG, SCALE_ADU_SUM)
+SCALE_REASON = {SCALE_CAMERA: "an older SHOBS-P log, before 2.3.0", SCALE_LOG_LOWER: "a lower limit from the sky's noise",
+                SCALE_LOG_LUM: "a clear (CV) luminance scale, ~0.1 mag faint"}
+
+
+# ---- star names ------------------------------------------------------------------------------------------------------
+
+def name_key(name) -> str:
+    """A star's name as FLUX compares it (0.6.0): case does not count, nor a space, underscore or hyphen next to a
+    letter, so "HD219134", "HD 219134" and "hd-219134" are one star (SHOBS-P, the capture program's OBJECT and the
+    catalogs spell catalog names differently). Between two digits a separator counts (any of them, as one): "TYC
+    123-4567-1" and "TYC 1234-567-1" stay two stars, "GSC 02652-01324" = "GSC 02652 01324". Signs and points count
+    ("BD+39 4529", "TOI 1234.01"). Shown names are never changed."""
+    t = str(name or "").strip()
+    t = re.sub(r"(?<!\d)[\s_\-]+|[\s_\-]+(?!\d)", "", t)    # a separator next to a letter does not count
+    return re.sub(r"[\s_\-]+", "-", t).casefold()          # between two digits it does: TYC 123-4567-1 ≠ 1234-567-1
+
+
+def same_name(a, b) -> bool:
+    """Two star names are the same star (name_key)."""
+    return bool(name_key(a)) and name_key(a) == name_key(b)
+
+
+# ---- one night as FLUX sees it --------------------------------------------------------------------------------------
+
+@dataclass
+class Dataset:
+    path: str
+    source: str                         # "SHOBS-P" (its on-sky log) or "SHOBS-FLUX" (a folder of lights)
+    written_by: str
+    written: str
+    run_id: str
+    night: str                          # the night's date (UTC date of JD − 12 h), YYYY-MM-DD
+    target: str
+    band: str                           # observing band code (TG, SI…)
+    catalog_band: str                   # what the catalog magnitudes are (V, SI…)
+    setup: dict
+    camera_id: str
+    color: str                          # R / G / B / L (luminance) / M (mono)
+    gain: float | None                  # e⁻/ADU used
+    gain_source: str                    # "measured" (camera profile) / "header" (EGAIN) / "none"
+    e_per_unit: float | None            # electrons per unit of the log's sky (and its flux when e_star is None)
+    raw_px_per_px: int                  # raw camera pixels along one side of the measured pixel
+    px_arcsec: float | None             # one measured pixel, arcsec
+    linear_limit_adu: float | None
+    read_noise_e: float | None
+    aperture_px: float | None
+    names: list                         # catalogued field stars used (target left out)
+    cat: np.ndarray                     # their catalog magnitudes
+    jd: np.ndarray
+    airmass: np.ndarray
+    exptime: np.ndarray
+    focuspos: np.ndarray
+    fwhm_px: np.ndarray
+    sky: np.ndarray                     # per frame, log units per measured pixel
+    flux: np.ndarray                    # frames × stars, log units (NaN = not measured)
+    peak: np.ndarray                    # frames × stars, raw ADU
+    segment: np.ndarray = None          # per frame: '' or 'flip' (SHOBS-P marks the frames after a meridian flip)
+    cadence: dict | None = None         # a FLUX folder run's time between ALL its lights (it may measure only some)
+    catalog_service: str = ""           # where the catalog magnitudes came from (a FLUX folder run says)
+    frames_are: str = "photometry"      # "photometry" or "imaging" (a FLUX folder run of astrophotography lights)
+    n_frames_in_log: int = 0
+    precalibrated: bool = False
+    notes: list = field(default_factory=list)
+    e_star: np.ndarray | None = None    # frames × stars: electrons per unit AT each star (format-2 SHOBS-P logs)
+    raw_sum_px: float = 1.0             # raw pixels summed into one measured pixel (read noise per measured pixel)
+    scale: str = SCALE_CAMERA           # what the electron scale rests on (SCALE_* above)
+    scale_note: str = ""                # in words, when the scale needs a caveat
+    log_version: int = 1                # the log's format_version
+    star_sky: np.ndarray | None = None  # frames × stars: the sky in the ring around each star (FLUX folder runs)
+
+    @property
+    def scale_exact(self) -> bool:
+        """True when the electron scale is the real one (a format-2 log with a gain, or a FLUX folder run)."""
+        return self.scale in SCALE_EXACT
+
+    def star_e(self) -> np.ndarray | None:
+        """Frames × stars: electrons per unit of each star's flux (None when no gain is known)."""
+        if self.e_star is not None:
+            return self.e_star
+        if self.e_per_unit is None:
+            return None
+        return np.full(self.flux.shape, float(self.e_per_unit))
+
+    def star_electrons(self) -> np.ndarray | None:
+        """Frames × stars: electrons in each star's aperture (NaN where not measured)."""
+        e = self.star_e()
+        return None if e is None else self.flux * e
+
+    def noise_sky_e(self) -> np.ndarray | None:
+        """Frames × stars: the sky's electrons per measured pixel AROUND EACH STAR, for the noise terms (0.6.0): the
+        star's own ring level when the log has it (a FLUX folder run), else the frame's sky, times the electrons per
+        unit AT that star (SHOBS-P 2.3.0 logs: the master flat's factor there, which moves ±8 % across a field) instead
+        of the frame's median. Where no sky is known (null) it is NaN, so that frame is left out of the noise medians; a
+        FLUX folder run's "not measurable" frame still has each star's ring (0 or more). The zero point does not use
+        this."""
+        e = self.star_e()
+        if e is None:
+            return None
+        sky = np.broadcast_to(self.sky[:, None], self.flux.shape).astype(float)
+        if self.star_sky is not None and self.star_sky.shape == sky.shape:
+            sky = np.where(np.isfinite(self.star_sky), self.star_sky, sky)
+        sky = np.abs(sky)                       # no sky known (null): NaN, left out of the medians as before 0.6.0
+        return sky * np.where(np.isfinite(e), e, self.e_per_unit if self.e_per_unit else np.nan)
+
+    @property
+    def key(self) -> tuple:
+        return (self.night, name_key(self.target), self.band, self.camera_id)
+
+    @property
+    def label(self) -> str:
+        return f"{self.night} {self.target} ({BAND_WORDS.get(self.band, self.band)})"
+
+
+@dataclass
+class NightResult:
+    ds: Dataset
+    usable: bool = False
+    why_not: str = ""                   # when not usable at all
+    lines: list = field(default_factory=list)          # (kind, text): bad / warn / ok / info
+    stars_used: list = field(default_factory=list)
+    stars_out: dict = field(default_factory=dict)      # name → reason
+    n_frames: int = 0
+    zp_frame: np.ndarray | None = None                 # per frame (NaN = left out)
+    zp_mean: float = float("nan")                      # at x_mean
+    x_mean: float = float("nan")
+    x_span: float = 0.0
+    zp1: float = float("nan")                          # at airmass 1
+    zp1_sigma: float = float("nan")
+    k: float = float("nan")                            # measured this night (NaN = not)
+    k_sigma: float = float("nan")
+    k_used: float = float("nan")
+    k_used_source: str = ""                            # "this night" / "profile" / "typical" / "all nights"
+    rms: float = float("nan")                          # per-frame residual rms
+    bin_rms: float = float("nan")                      # 10-minute binned residual rms
+    bin_range: float = float("nan")                    # lowest to highest 10-minute bin
+    photometric: bool = False
+    trend: float = float("nan")                        # the zero point's straight-line change, first frame to last
+    marginal: bool = False                             # photometric by the bins, but drifting by ≥ TREND_MAG
+    too_short: bool = False                            # under MIN_BINS time bins: the sky could not be judged
+    fwhm_arcsec: float = float("nan")
+    fwhm_sigma: float = float("nan")
+    focus: float = float("nan")                        # median FOCUSPOS
+    defocused: bool = False
+    defocus_key: str = ""
+    sky_mag: float = float("nan")                      # mag/arcsec²
+    moon_illum: float = float("nan")
+    cy: float = float("nan")
+    cy_n: int = 0
+    overhead_s: float = float("nan")
+    overhead_n: int = 0
+    interval_s: float = float("nan")                   # median time from one frame to the next
+    exptime_s: float = float("nan")
+
+    @property
+    def imaging(self) -> bool:
+        """Frames shot for astrophotography (careful focus): their star size is the imaging-focus seeing only."""
+        return self.ds.frames_are == "imaging"
+
+    @property
+    def worst(self) -> str:
+        for kind in ("bad", "warn"):
+            for k, t in self.lines:
+                if k == kind:
+                    return t
+        return ""
+
+
+# ---- reading ----------------------------------------------------------------------------------------------------------
+
+def _f(v):
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def log_files(folder: str | None = None) -> list[str]:
+    d = folder or sp.onsky_dir(make=False)
+    if not os.path.isdir(d):
+        return []
+    return sorted(os.path.join(d, n) for n in os.listdir(d) if n.endswith(".json") and not n.startswith("."))
+
+
+def camera_numbers(cam_profile: dict | None, color: str, header_gain) -> dict:
+    """gain, read noise and linear limit for one color: the camera profile's own for that color when the bench
+    measured it, else its camera-wide value, else the header's EGAIN (gain only)."""
+    out = {"gain": None, "gain_source": "none", "read_noise_e": None, "linear_limit_adu": None}
+    ch = color if color in ("R", "G", "B") else None
+    if cam_profile:
+        g, rec = sp.camera_value(cam_profile, "gain_e_per_adu", ch)
+        if g is not None and g > 0:
+            out["gain"], out["gain_source"] = float(g), rec.get("source", "measured") if rec else "measured"
+        rn, _ = sp.camera_value(cam_profile, "read_noise_e", ch)
+        out["read_noise_e"] = _f(rn)
+        lin, _ = sp.camera_value(cam_profile, "linear_limit_adu", ch)
+        out["linear_limit_adu"] = _f(lin)
+    if out["gain"] is None and _f(header_gain):
+        out["gain"], out["gain_source"] = float(header_gain), "header"
+    return out
+
+
+def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
+    """One on-sky log as a Dataset. cam_lookup(camera_id) → camera profile or None (default: the saved one).
+    OnSkyError when it cannot be learned from."""
+    if isinstance(path_or_doc, dict):
+        doc = path_or_doc
+    else:
+        path = path_or_doc
+        try:
+            doc = sp.load(path)
+        except sp.NewerFormatError as exc:
+            raise OnSkyNewerError(f"{NEWER_WORDS} ({exc}): update SHOBS-FLUX; the file is fine, leave it where "
+                                  "it is") from None
+        except sp.ProfileError as exc:
+            raise OnSkyError(f"it cannot be read: {exc}") from None
+    if doc.get("format") != sp.ONSKY_FORMAT:
+        raise OnSkyError("it is not an on-sky log")
+    ver = doc.get("format_version")
+    if isinstance(ver, int) and not isinstance(ver, bool) and ver > sp.ONSKY_FORMAT_VERSION:
+        raise OnSkyNewerError(f"{NEWER_WORDS} (format version {ver}; this FLUX reads up to "
+                              f"{sp.ONSKY_FORMAT_VERSION}): update SHOBS-FLUX; the file is fine, leave it where it is")
+    log_version = ver if isinstance(ver, int) and not isinstance(ver, bool) and ver >= 1 else 1
+    cam_lookup = cam_lookup or sp.find_camera_profile
+    setup = dict(doc.get("setup") or {})
+    meas = doc.get("measurement") or {}
+    band = str(doc.get("band") or "").upper() or "CV"
+    cat_band = str(doc.get("catalog_band") or BAND_CATALOG.get(band, "V")).upper()
+    pattern = setup.get("bayer_pattern")
+    mono = not pattern or str(pattern).upper() in ("MONO", "NONE")
+    if mono:
+        color, n_color = "M", 1
+    else:
+        color, n_color = DEBAYER_COLOR.get(str(meas.get("debayer_mode") or "").lower(),
+                                           BAND_COLOR.get(band, ("L", 4)))
+    cam_id = setup.get("camera_id") or sp.camera_id(setup.get("instrume") or "unknown camera",
+                                                    setup.get("gain_setting"), setup.get("offset"),
+                                                    setup.get("camera_binning") or 1)
+    try:
+        cam = cam_lookup(cam_id)
+    except Exception:
+        cam = None
+    nums = camera_numbers(cam, color, setup.get("e_per_adu_header"))
+    soft_bin = int(_f(meas.get("software_binning")) or 1)
+    rpp = _f(meas.get("raw_px_per_px"))
+    rpp = int(rpp) if rpp else (soft_bin if mono else 2 * soft_bin)
+    # electrons per log unit: SHOBS-P's pixel is the AVERAGE of the color's raw pixels in the cell (and of the
+    # software-binned cells), so its value × (pixels averaged) × gain is the electrons it holds. FLUX's own folder
+    # runs store sums of raw ADU (flux_is_adu_sum), one ADU = gain electrons.
+    if meas.get("flux_is_adu_sum"):
+        per_unit_px = 1.0
+    else:
+        per_unit_px = float(n_color * soft_bin * soft_bin)
+    # raw pixels summed into one measured pixel: each carries its own read noise. SHOBS-P's averaged pixel in
+    # electrons is the same sum (per_unit_px); a FLUX folder run sums raw ADU (a TG pixel = 2 greens), so its count is
+    # in the log from 1.0.0 (raw_px_summed) and follows from the band for older logs (GitHub SHOBS-FLUX #1)
+    if meas.get("flux_is_adu_sum"):
+        raw_sum_px = _f(meas.get("raw_px_summed")) or float(n_color * soft_bin * soft_bin)
+    else:
+        raw_sum_px = per_unit_px
+    e_per_unit = nums["gain"] * per_unit_px if nums["gain"] else None
+    gain_used, gain_source = nums["gain"], nums["gain_source"]
+    # Format 2 (SHOBS-P 2.3.0, #55): SHOBS-P writes electrons per image unit itself, per star and per frame, with
+    # the gain, the binning, the superpixel debayer AND the master flat's value at the star in it. FLUX uses those
+    # (rescaled to the camera profile's measured gain when there is one), so nothing is guessed. Format 1 has no
+    # scale: the gain × pixels above leaves out the flat's factor (green sits ~1.3 above the flat's median on an OSC
+    # flat → zero point ~0.3–0.45 mag too faint).
+    log_scale = None
+    if meas.get("flux_is_adu_sum"):
+        scale, scale_note = SCALE_ADU_SUM, ""
+    else:
+        scale = SCALE_CAMERA
+        scale_note = ("an older SHOBS-P log (before 2.3.0): its flux scale is worked out from the gain alone and "
+                      "leaves out the master flat's factor, so its zero point can be up to ~0.4 mag too faint; "
+                      "reduce the night again in SHOBS-P 2.3.0 or later to fix it")
+        src = str(meas.get("e_per_unit_source") or "")
+        med = _f(meas.get("e_per_unit_median"))
+        if log_version >= 2 and src in ("EGAIN", "sky"):
+            log_scale = (src, med if med and med > 0 else None)  # no median written: the stars' own (below)
+        elif log_version >= 2:
+            why = str(meas.get("e_per_unit_note") or "").strip().rstrip(".")
+            scale_note = ("SHOBS-P could not write this log's electrons per unit" + (f" ({why})" if why else "")
+                          + ", so it is worked out from the gain alone and leaves out the master flat's factor: the "
+                          "zero point can be up to ~0.4 mag too faint")
+    pix_um, focal = _f(setup.get("pixel_um")), _f(setup.get("focal_header_mm") or setup.get("focal_mm"))
+    # pixel_um is the sensor's own pixel (shobs_profile.setup_key divides XPIXSZ by the binning); a "raw" pixel in
+    # raw_px_per_px is the camera's (binned) pixel
+    cam_bin = int(_f(setup.get("camera_binning")) or 1)
+    px_arcsec = 206.264806 * pix_um * cam_bin / focal * rpp if pix_um and focal else None
+
+    stars = doc.get("stars") or []
+    names, cats = [], []
+    # the target is always left out, also when a field star is the target spelled another way ("HD 219134" for
+    # "HD219134"); a star listed twice under two spellings counts once
+    skip = {name_key(doc.get("target"))} | {name_key(s.get("name")) for s in stars
+                                            if isinstance(s, dict) and s.get("role") == "target"}
+    skip.discard("")
+    for s in stars:
+        if not isinstance(s, dict) or s.get("role") == "target":
+            continue
+        m = _f(s.get("catalog_mag"))
+        if m is None or not s.get("name") or name_key(s["name"]) in skip:
+            continue
+        skip.add(name_key(s["name"]))
+        names.append(str(s["name"]))
+        cats.append(m)
+    frames_in = [f for f in (doc.get("frames") or []) if isinstance(f, dict)]
+    pre = bool(doc.get("precalibrated"))
+    keep = [f for f in frames_in if not (f.get("flag") or "") and not f.get("precalibrated")
+            and _f(f.get("jd_mid")) and _f(f.get("exptime_s"))]
+    nf, ns = len(keep), len(names)
+    flux = np.full((nf, ns), np.nan)
+    peak = np.full((nf, ns), np.nan)
+    idx = {name_key(n): i for i, n in enumerate(names)}       # a frame may spell a star another way
+    e_star = np.full((nf, ns), np.nan) if log_scale else None
+    star_sky = np.full((nf, ns), np.nan)
+    for fi, fr in enumerate(keep):
+        for n, m in (fr.get("stars") or {}).items():
+            j = idx.get(name_key(n))
+            if j is None or not isinstance(m, dict):
+                continue
+            v = _f(m.get("flux"))
+            flux[fi, j] = v if v is not None else np.nan
+            p = _f(m.get("peak_adu"))
+            peak[fi, j] = p if p is not None else np.nan
+            if meas.get("flux_is_adu_sum"):        # only FLUX's own folder runs write a star's ring, in its units
+                q = _f(m.get("sky"))
+                star_sky[fi, j] = q if q is not None else np.nan
+            if e_star is not None:
+                e = _f(m.get("e_per_unit"))
+                e_star[fi, j] = e if e is not None and e > 0 else np.nan
+    if log_scale and log_scale[1] is None:
+        got = e_star[np.isfinite(e_star)] if e_star is not None and e_star.size else np.array([])
+        if got.size:
+            log_scale = (log_scale[0], float(np.median(got)))
+        else:                                             # no scale anywhere in the log: the old way, with its caveat
+            log_scale, e_star = None, None
+            scale_note = ("SHOBS-P wrote no electrons per unit in this log, so it is worked out from the gain alone "
+                          "and leaves out the master flat's factor: the zero point can be up to ~0.4 mag too faint")
+    if log_scale:
+        src, med = log_scale
+        if e_star.size:                                   # a star the log gave no scale for: the frame's median
+            e_star = np.where(np.isfinite(e_star), e_star, med)
+        hdr = _f(setup.get("e_per_adu_header"))
+        # SHOBS-P's EGAIN in the scale is × camera_bin² when the camera AVERAGED its binned pixels; a camera profile
+        # for that binned setup measured the binned pixel's own e⁻/ADU, so compare like with like
+        bin_mode = str(meas.get("camera_bin_mode") or "").lower()
+        eff_hdr = hdr
+        if hdr and cam_bin > 1 and bin_mode == "averaged":
+            eff_hdr = hdr * cam_bin * cam_bin
+        elif hdr and cam_bin > 1 and bin_mode != "summed":
+            eff_hdr = None                                # not known how the camera binned: no rescale
+        fac = 1.0
+        if src == "EGAIN" and nums["gain"] and nums["gain_source"] not in ("header", "none") and eff_hdr:
+            fac = nums["gain"] / eff_hdr                  # SHOBS-P used EGAIN; the camera profile knows better
+        e_star = e_star * fac
+        e_per_unit = med * fac                            # the sky: the frame's median scale (its flat in it too)
+        if src == "EGAIN":
+            scale, scale_note = SCALE_LOG, ""
+            if fac == 1.0:
+                if eff_hdr:
+                    gain_used, gain_source = eff_hdr, "header"
+                else:                                     # the log's own scale; the profile's gain not applied to it
+                    gain_used, gain_source = (nums["gain"] or None), "log"
+            if color == "L":
+                scale = SCALE_LOG_LUM
+                scale_note = ("a clear (CV) log: SHOBS-P's electrons per unit for the luminance is a photon-noise "
+                              "figure for four flat-divided color pixels, right for the noise but a few per cent too "
+                              "few electrons, so the zero point is ~0.1 mag too faint; a single color band (TG, TR, "
+                              "TB) has the exact scale")
+        else:
+            scale = SCALE_LOG_LOWER
+            scale_note = ("SHOBS-P worked out this log's electrons per unit from the sky's own noise (no EGAIN in "
+                          "the frames): that is a lower limit, so the zero point is a little too faint; a camera "
+                          "profile from a bench run fixes it")
+
+    def col(key):
+        return np.array([_f(f.get(key)) if _f(f.get(key)) is not None else np.nan for f in keep], dtype=float)
+
+    ds = Dataset(
+        path=path, source="SHOBS-FLUX" if str(doc.get("written_by", "")).startswith("SHOBS-FLUX") else "SHOBS-P",
+        written_by=str(doc.get("written_by") or ""), written=str(doc.get("written") or ""),
+        run_id=str(doc.get("run_id") or ""), night=str(doc.get("night") or ""),
+        target=str(doc.get("target") or "unknown"), band=band, catalog_band=cat_band, setup=setup,
+        camera_id=cam_id, color=color, gain=gain_used, gain_source=gain_source, e_per_unit=e_per_unit,
+        raw_px_per_px=rpp, px_arcsec=px_arcsec, linear_limit_adu=nums["linear_limit_adu"],
+        read_noise_e=nums["read_noise_e"], aperture_px=_f(meas.get("aperture_radius_px")), names=names,
+        cat=np.array(cats, dtype=float), jd=col("jd_mid"), airmass=col("airmass"), exptime=col("exptime_s"),
+        focuspos=col("focuspos"), fwhm_px=col("fwhm_px"), sky=col("sky"), flux=flux, peak=peak,
+        segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object),
+        cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None,
+        catalog_service=str(doc.get("catalog_service") or ""), n_frames_in_log=len(frames_in), precalibrated=pre,
+        e_star=e_star, raw_sum_px=raw_sum_px, scale=scale, scale_note=scale_note, log_version=log_version,
+        star_sky=star_sky if np.isfinite(star_sky).any() else None)
+    # imaging focus (guided astrophotography) is said only by a FLUX folder run; SHOBS-P's logs are photometry
+    if ds.source == "SHOBS-FLUX" and str(doc.get("frames_are") or "").lower() == "imaging":
+        ds.frames_are = "imaging"
+    if not ds.night and nf:
+        ds.night = night_of(float(np.nanmin(ds.jd)))
+    return ds
+
+
+def night_of(jd: float) -> str:
+    """The night's date as SHOBS-P names it: the UTC date of JD − 12 h (the evening's date)."""
+    from datetime import datetime, timedelta, timezone
+    t = datetime(2000, 1, 1, 12, tzinfo=timezone.utc) + timedelta(days=jd - 2451545.0 - 0.5)
+    return t.strftime("%Y-%m-%d")
+
+
+def _utc(text: str) -> float:
+    """An ISO time (any offset, or Z) as seconds since 1970 UTC; 0 when it cannot be read."""
+    from datetime import datetime, timezone
+    try:
+        t = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t.timestamp()
+
+
+def newest_per_night(datasets: list) -> tuple[list, list]:
+    """(kept, replaced): only the newest log of each night + target + band + camera counts (a re-run of a night in
+    SHOBS-P writes a second log; counting both would weigh that night twice)."""
+    best: dict = {}
+    for ds in datasets:
+        k = ds.key
+        cur = best.get(k)
+        if cur is None or (_utc(ds.written), ds.run_id) > (_utc(cur.written), cur.run_id):
+            best[k] = ds
+    kept = [d for d in datasets if best.get(d.key) is d]
+    return kept, [d for d in datasets if best.get(d.key) is not d]
+
+
+# ---- small statistics ----------------------------------------------------------------------------------------------
+
+def rsigma(a) -> float:
+    a = np.asarray(a, dtype=float)
+    a = a[np.isfinite(a)]
+    if a.size < 2:
+        return float("nan")
+    return float(1.4826 * np.median(np.abs(a - np.median(a))))
+
+
+def clipped(values, sigmas=None, nsig: float = CLIP_SIGMA, iters: int = 5):
+    """Indices kept after iterative clipping around the median (robust sigma; with sigmas, a point is also kept when
+    it agrees within nsig of its own error)."""
+    v = np.asarray(values, dtype=float)
+    ok = np.isfinite(v)
+    for _ in range(iters):
+        if ok.sum() < 3:
+            break
+        med = np.median(v[ok])
+        s = rsigma(v[ok])
+        if not math.isfinite(s) or s == 0:
+            s = float(np.std(v[ok])) or 0.0
+        lim = nsig * s
+        dev = np.abs(v - med)
+        new = np.isfinite(v) & (dev <= lim if sigmas is None else (dev <= lim) |
+                                (dev <= nsig * np.asarray(sigmas, dtype=float)))
+        if lim == 0:
+            new = np.isfinite(v)
+        if (new == ok).all():
+            break
+        ok = new
+    return ok
+
+
+def wmean(values, sigmas):
+    v = np.asarray(values, dtype=float)
+    s = np.asarray(sigmas, dtype=float)
+    good = np.isfinite(v) & np.isfinite(s) & (s > 0)
+    if not good.any():
+        good = np.isfinite(v)
+        if not good.any():
+            return float("nan"), float("nan")
+        return float(np.mean(v[good])), float(np.std(v[good]) / math.sqrt(good.sum())) if good.sum() > 1 else float("nan")
+    w = 1.0 / s[good] ** 2
+    m = float(np.sum(w * v[good]) / np.sum(w))
+    err = math.sqrt(1.0 / float(np.sum(w)))
+    if good.sum() > 1:                               # never claim less than the nights' own scatter allows
+        err = max(err, float(np.std(v[good], ddof=1)) / math.sqrt(good.sum()))
+    return m, err
+
+
+def linfit(x, y, nsig: float = 3.0, iters: int = 5):
+    """y = a + b (x − 1), clipped. (a, b, sa, sb, rms, keep mask) or None."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    res = None
+    for _ in range(iters):
+        if ok.sum() < 3:
+            return res
+        X = np.vstack([np.ones(ok.sum()), x[ok] - 1.0]).T
+        coef, *_ = np.linalg.lstsq(X, y[ok], rcond=None)
+        r = y - (coef[0] + coef[1] * (x - 1.0))
+        rms = float(np.sqrt(np.mean(r[ok] ** 2)))
+        n = ok.sum()
+        cov = np.linalg.pinv(X.T @ X) * (np.sum(r[ok] ** 2) / max(n - 2, 1))
+        res = (float(coef[0]), float(coef[1]), float(math.sqrt(max(cov[0, 0], 0))),
+               float(math.sqrt(max(cov[1, 1], 0))), rms, ok.copy())
+        s = rsigma(r[ok]) or rms
+        new = np.isfinite(x) & np.isfinite(y) & (np.abs(r) <= nsig * max(s, 1e-4))
+        if (new == ok).all():
+            break
+        ok = new
+    return res
+
+
+def binned_rms(jd, resid, width: float = BIN_DAYS) -> tuple[float, int, float]:
+    """(rms of the residuals' bin medians in bins of `width` days (bins with ≥ 3 points), the number of bins, the
+    range from the lowest bin to the highest)."""
+    jd = np.asarray(jd, dtype=float)
+    r = np.asarray(resid, dtype=float)
+    ok = np.isfinite(jd) & np.isfinite(r)
+    if ok.sum() < 3:
+        return float("nan"), 0, float("nan")
+    jd, r = jd[ok], r[ok]
+    if len(jd) > 1:                                      # sparse frames: wide enough bins for 3 frames each
+        width = max(width, 3.0 * float(np.median(np.diff(np.sort(jd)))))
+    b = np.floor((jd - jd.min()) / width).astype(int)
+    means = [float(np.median(r[b == i])) for i in np.unique(b) if (b == i).sum() >= 3]   # one odd frame moves no bin
+    if len(means) < 2:
+        return float(np.std(r) / math.sqrt(max(len(r), 1))), len(means), 0.0
+    m = np.asarray(means)
+    return float(np.sqrt(np.mean((m - np.mean(m)) ** 2))), len(means), float(m.max() - m.min())
+
+
+def moon_illumination(jd: float) -> float:
+    """The Moon's illuminated fraction (0–1) at a JD, geocentric; NaN when astropy is not there."""
+    try:
+        from astropy.coordinates import get_body
+        from astropy.time import Time
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            t = Time(jd, format="jd")
+            sun, moon = get_body("sun", t), get_body("moon", t)
+            elong = sun.separation(moon).radian
+        return float((1.0 - math.cos(elong)) / 2.0)
+    except Exception:
+        return float("nan")
+
+
+def scint_factor(aperture_m: float, exptime_s, airmass, elevation_m: float) -> np.ndarray:
+    """σ_scint / C_Y (relative flux) per frame: Osborn et al. 2015 eq. 7, σ² = 1e-5 C_Y² D^(-4/3) t^-1 X^3 exp(-2h/H)."""
+    t = np.asarray(exptime_s, dtype=float)
+    x = np.asarray(airmass, dtype=float)
+    return np.sqrt(1e-5 * aperture_m ** (-4.0 / 3.0) / t * x ** 3 * math.exp(-2.0 * elevation_m / SCALE_HEIGHT_M))
+
+
+# ---- one night -------------------------------------------------------------------------------------------------------
+
+def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None = None,
+            elevation_m: float | None = None) -> NightResult:
+    """What one night says. k_prior = (k, source words) used when the night cannot measure its own extinction."""
+    res = NightResult(ds=ds)
+    L = res.lines
+    if ds.precalibrated:
+        res.why_not = "its frames were calibrated before SHOBS-P read them, so their flux scale is not known"
+        L.append(("bad", f"✖ Not used: {res.why_not}."))
+        return res
+    if ds.e_per_unit is None:
+        res.why_not = "no gain is known for this camera (no camera profile and no EGAIN in the header)"
+        L.append(("bad", f"✖ Not used: {res.why_not}."))
+        return res
+    nf = len(ds.jd)
+    res.n_frames = nf
+    if nf < MIN_FRAMES:
+        res.why_not = f"only {nf} usable frame{'s' if nf != 1 else ''} (at least {MIN_FRAMES} needed)"
+        L.append(("bad", f"✖ Not used: {res.why_not}."))
+        return res
+    if ds.gain_source == "header" and ds.gain:
+        L.append(("info", f"Gain {ds.gain:.4f} e⁻/ADU from the frames' header (EGAIN): there is no camera profile "
+                          f"for {ds.camera_id}; a bench run makes the zero point exact."))
+    if ds.scale == SCALE_LOG:
+        L.append(("info", "Electrons per image unit from SHOBS-P's log, at each star (gain, binning and the master "
+                          "flat's factor are in it)."))
+    elif ds.scale_note:
+        L.append(("warn", f"⚠ Zero point scale: {ds.scale_note}."))
+    res.exptime_s = float(np.nanmedian(ds.exptime))
+    _seeing(res)
+    _cadence(res)
+
+    ns = len(ds.names)
+    if ns == 0:
+        res.why_not = "no catalogued field stars in it"
+        L.append(("bad", f"✖ No zero point: {res.why_not}. Seeing and cadence are still used."))
+        res.usable = True
+        return res
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rate = ds.star_electrons() / ds.exptime[:, None]
+        zp = ds.cat[None, :] + 2.5 * np.log10(np.where(rate > 0, rate, np.nan))
+    out = res.stars_out
+    lin = ds.linear_limit_adu
+    if not lin:
+        lin = LINEAR_GUESS_ADU
+        L.append(("info", f"No measured linear limit for {ds.camera_id}: stars peaking at {lin:,.0f} ADU or more are "
+                          "treated as saturated (80 % of a 16-bit range; a bench run measures it)."))
+    if lin:
+        sat = np.isfinite(ds.peak) & (ds.peak >= lin)
+        zp[sat] = np.nan
+        frac = sat.sum(axis=0) / max(nf, 1)
+        for j in np.where(frac > SAT_FRACTION)[0]:
+            out[ds.names[j]] = f"saturated (raw peak ≥ the linear limit {lin:,.0f} ADU in {frac[j]:.0%} of frames)"
+            zp[:, j] = np.nan
+    for j in range(ns):
+        if ds.names[j] not in out and np.isfinite(zp[:, j]).sum() < max(3, nf // 3):
+            out[ds.names[j]] = "measured in too few frames"
+            zp[:, j] = np.nan
+    good = [j for j in range(ns) if ds.names[j] not in out]
+    # catalog disagreement and variability, against the ensemble of the others
+    # each star's own expected noise (photon, sky, read; mag per frame), so a faint star's scatter is not taken
+    # for variability
+    expect = _expected_mag_noise(ds)
+    n_start = len(good)
+    while len(good) >= 2 and n_start - len(good) < n_start // 2:          # never more than half the stars
+        ens = np.nanmedian(zp[:, good], axis=1)
+        offs = np.array([np.nanmedian(zp[:, j] - ens) for j in good])
+        scat = np.array([rsigma(zp[:, j] - ens) for j in good])
+        s_off = rsigma(offs) if len(good) >= 3 else float("nan")
+        med_off = float(np.nanmedian(offs))
+        med_scat = float(np.nanmedian(scat))
+        drop = []
+        for i, j in enumerate(good):
+            d = offs[i] - med_off
+            lim = max(CAT_OFFSET_MAG, CAT_OFFSET_SIGMA * s_off if math.isfinite(s_off) else 0.0)
+            if len(good) >= 3 and abs(d) > lim:
+                drop.append((abs(d), j, f"its catalog magnitude disagrees with the other stars by {d:+.2f} mag (a "
+                                        f"wrong catalog value, a blend or a variable)"))
+            elif len(good) >= 4 and math.isfinite(scat[i]) and med_scat > 0 and scat[i] > VARY_FACTOR * med_scat \
+                    and scat[i] > 0.01:
+                own = expect[j]
+                if math.isfinite(own) and scat[i] <= 2.0 * own:
+                    drop.append((scat[i], j, f"too faint to help ({scat[i]:.3f} mag scatter, about what its own "
+                                             f"photon and sky noise give)"))
+                else:
+                    drop.append((scat[i], j, f"it varies ({scat[i]:.3f} mag scatter against the others, "
+                                             f"{scat[i] / med_scat:.1f}× the typical star)"))
+        if not drop:
+            break
+        _, j, why = max(drop, key=lambda t: t[0])                         # one at a time, worst first
+        out[ds.names[j]] = why
+        good.remove(j)
+    res.stars_used = [ds.names[j] for j in good]
+    if len(good) < MIN_STARS:
+        res.why_not = (f"only {len(good)} usable catalogued star{'s' if len(good) != 1 else ''} "
+                       f"(at least {MIN_STARS} needed)")
+        L.append(("warn", f"⚠ No zero point: {res.why_not}. Seeing and cadence are still used."))
+        res.usable = True
+        _sky(res, None)
+        return res
+    # each star's zero point shifted onto the ensemble (removes catalog offsets), then averaged per frame
+    ens = np.nanmedian(zp[:, good], axis=1)
+    offs = np.array([np.nanmedian(zp[:, j] - ens) for j in good])
+    shifted = zp[:, good] - (offs - np.nanmedian(offs))[None, :]    # median: one odd star cannot move the level
+    scat = np.array([rsigma(shifted[:, i] - ens) for i in range(len(good))])
+    w = 1.0 / np.maximum(np.where(np.isfinite(scat), scat, np.nanmax(scat) if np.isfinite(scat).any() else 1.0),
+                         0.003) ** 2                                       # a faint star weighs less than a bright one
+    wm = np.where(np.isfinite(shifted), w[None, :], 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        zf = np.nansum(np.where(np.isfinite(shifted), shifted, 0.0) * wm, axis=1) / wm.sum(axis=1)
+    res.zp_frame = zf
+    ok = np.isfinite(zf) & np.isfinite(ds.airmass)
+    if ok.sum() < MIN_FRAMES:
+        res.why_not = "too few frames with both a zero point and an airmass"
+        L.append(("warn", f"⚠ No zero point: {res.why_not}."))
+        res.usable = True
+        return res
+    x = ds.airmass
+    res.x_span = float(np.nanmax(x[ok]) - np.nanmin(x[ok]))
+    zf, flip_step = _remove_flip_step(zf, x, ds.segment, ok)
+    if flip_step is not None:
+        res.zp_frame = zf
+        L.append(("info", f"The zero point steps {flip_step:+.3f} mag at the meridian flip (the other pier side: "
+                          "flats or vignetting differ); taken out, so the night is judged as one."))
+    fit = linfit(x, zf)
+    if fit is None:
+        res.why_not = "the zero points could not be fitted"
+        L.append(("warn", f"⚠ No zero point: {res.why_not}."))
+        res.usable = True
+        return res
+    a, b, sa, sb, rms, keep = fit
+    k_fit, k_fit_s = -b, sb
+    nbins = 0
+    k_ok = False
+    prior_measured = bool(k_prior and k_prior[0] is not None and math.isfinite(k_prior[0])
+                          and k_prior[1] == "profile")
+    k_disagrees = prior_measured and abs(k_fit - k_prior[0]) > 3 * k_fit_s + 0.1
+    if res.x_span >= K_MIN_SPAN and K_RANGE[0] <= k_fit <= K_RANGE[1] and k_fit_s < 0.1 and not k_disagrees:
+        resid = zf - (a + b * (x - 1.0))
+        bin_rms, nbins, bin_range = binned_rms(ds.jd[ok], resid[ok])     # every frame: clipping would hide haze
+        k_ok = bool(math.isfinite(bin_rms) and bin_rms <= PHOT_BIN_RMS and bin_range <= PHOT_BIN_RANGE
+                    and nbins >= MIN_BINS and keep[ok].mean() >= 0.8)
+    if k_ok:
+        res.rms, res.bin_rms, res.bin_range = rms, bin_rms, bin_range
+        res.photometric = True
+        res.k, res.k_sigma = k_fit, k_fit_s
+        res.k_used, res.k_used_source = k_fit, "this night"
+        res.zp1, res.zp1_sigma = a, max(sa, ZP_FLOOR)
+        res.x_mean = float(np.mean(x[keep]))
+        res.zp_mean = float(np.mean(zf[keep]))
+    else:
+        # the extinction is not this night's to measure: hold it at the prior and judge the night against THAT
+        # (a free slope over a short airmass span would soak up a slow change in transparency)
+        kp, src = k_prior if k_prior and k_prior[0] is not None and math.isfinite(k_prior[0]) else \
+            (TYPICAL_K.get(ds.catalog_band, 0.2), "typical")
+        res.k_used, res.k_used_source = kp, src
+        flat = zf + kp * (x - 1.0)                         # each frame's zero point moved to airmass 1
+        keep = clipped(flat, nsig=3.0) & ok
+        r = flat - np.mean(flat[keep])
+        res.rms = float(np.sqrt(np.mean(r[keep] ** 2)))
+        res.bin_rms, nbins, res.bin_range = binned_rms(ds.jd[ok], r[ok])
+        res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS
+                               and res.bin_range <= PHOT_BIN_RANGE and nbins >= MIN_BINS
+                               and keep.sum() >= MIN_FRAMES and keep.sum() >= 0.8 * ok.sum())
+        res.x_mean = float(np.mean(x[keep]))
+        res.zp_mean = float(np.mean(zf[keep]))
+        res.zp1 = res.zp_mean + kp * (res.x_mean - 1.0)
+        res.zp1_sigma = max(res.rms / math.sqrt(keep.sum()), ZP_FLOOR) + 0.02 * abs(res.x_mean - 1.0)
+    rms = res.rms
+    res.usable = True
+    # a slow, steady change (haze clearing or coming) can stay inside the bin limits and still move the zero point.
+    # Where this night's own k was fitted, a drift along a one-way airmass track hides in k, so the night is also
+    # judged with the profile's measured k (when there is one): the larger drift counts.
+    tracks = [resid if k_ok else r]
+    if k_ok and prior_measured:
+        flat_p = zf + k_prior[0] * (x - 1.0)
+        tracks.append(flat_p - np.nanmean(flat_p[ok & keep]))
+    use = ok & keep & np.isfinite(ds.jd)
+    if use.sum() >= MIN_FRAMES:
+        t = ds.jd[use] - float(np.min(ds.jd[use]))
+        span = float(np.ptp(t))
+        if span > 0:
+            got = [float(np.polyfit(t, tr[use], 1)[0]) * span for tr in tracks if np.isfinite(tr[use]).all()]
+            if got:
+                res.trend = max(got, key=abs)
+    res.marginal = bool(res.photometric and math.isfinite(res.trend) and abs(res.trend) >= TREND_MAG)
+
+    # findings
+    if nbins < MIN_BINS:
+        res.photometric = False
+        res.too_short = True
+        L.append(("info", f"Too short to judge the sky: {nbins} time bin{'s' if nbins != 1 else ''} of at least "
+                          f"10 minutes ({MIN_BINS} needed). Kept out of the zero point and extinction; seeing, sky, "
+                          "scintillation and cadence still count."))
+    else:
+        L.append(("ok" if res.photometric and not res.marginal else "warn",
+                  (f"✔ Photometric: the zero point held within {res.bin_range:.3f} mag across {nbins} time bins "
+                   f"(rms {res.bin_rms:.3f})."
+                   if res.photometric and not res.marginal else
+                   f"⚠ Marginal: the zero point held within {res.bin_range:.3f} mag in time bins (rms "
+                   f"{res.bin_rms:.3f}) but {'climbed' if res.trend > 0 else 'fell'} steadily by {abs(res.trend):.3f} "
+                   f"mag from the first frame to the last (limit {TREND_MAG}): the sky was "
+                   f"{'clearing' if res.trend > 0 else 'hazing over'}. Used "
+                   "for the zero point and extinction only when no clean photometric night is there."
+                   if res.photometric else
+                   f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in time bins "
+                   f"(rms {res.bin_rms:.3f}; limits {PHOT_BIN_RANGE} and {PHOT_BIN_RMS}): clouds or haze. Kept out of "
+                   "the zero point and extinction; seeing, sky, scintillation and cadence still count.")))
+    if k_ok:
+        L.append(("ok", f"✔ Extinction measured: k = {k_fit:.3f} ± {k_fit_s:.3f} mag/airmass over airmass "
+                        f"{np.nanmin(x[keep]):.2f}–{np.nanmax(x[keep]):.2f}."))
+    elif res.photometric and res.x_span < K_MIN_SPAN:
+        L.append(("info", f"Extinction not measured: airmass only spanned {res.x_span:.2f} (needs {K_MIN_SPAN}); "
+                          f"k = {res.k_used:.2f} used ({res.k_used_source})."))
+    elif res.x_span >= K_MIN_SPAN:
+        why = ("outside the physical range " f"{K_RANGE[0]:g}–{K_RANGE[1]:g}" if not K_RANGE[0] <= k_fit <= K_RANGE[1]
+               else "too uncertain" if k_fit_s >= 0.1
+               else f"far from your measured {k_prior[0]:.3f} (haze coming or going along the airmass track looks "
+                    "like extinction)" if k_disagrees else "the sky changed during the night")
+        L.append(("warn", f"⚠ Extinction not measured: the fit over airmass {np.nanmin(x[ok]):.2f}–"
+                          f"{np.nanmax(x[ok]):.2f} gave k = {k_fit:.3f} ± {k_fit_s:.3f}, but {why}; "
+                          f"k = {res.k_used:.2f} used ({res.k_used_source})."))
+    L.append(("info", f"Zero point {res.zp1:.3f} ± {res.zp1_sigma:.3f} mag for 1 e⁻/s at airmass 1 "
+                      f"({res.zp_mean:.3f} at airmass {res.x_mean:.2f}); {len(good)} catalogued stars, "
+                      f"{int(keep.sum())} frames, residual {rms:.3f} mag per frame."))
+    for n, why in out.items():
+        L.append(("info", f"Left out {n}: {why}."))
+    _sky(res, zf)
+    if aperture_mm and elevation_m is not None:
+        _scintillation(res, zp, good, aperture_mm / 1000.0, elevation_m)
+    elif not aperture_mm:
+        L.append(("info", "Scintillation not worked out: type the telescope aperture on the Sky page."))
+    else:
+        L.append(("info", "Scintillation not worked out: type the site elevation on the Sky page."))
+    return res
+
+
+def _remove_flip_step(z, x, segment, ok):
+    """(z with the step at a meridian flip taken out, the step in mag or None). The step is fitted together with a
+    straight line in airmass (z = a + b (X − 1) + step × after-flip), so a changing airmass is not mistaken for it.
+    Only when both sides have at least 5 frames; the frames' average level is kept."""
+    if segment is None or len(segment) != len(z):
+        return z, None
+    seg = np.asarray([str(v or "") for v in segment], dtype=object)
+    after = (seg != seg[np.argmax(ok)]) if ok.any() else np.zeros(len(z), bool)
+    n_after, n_before = int((after & ok).sum()), int((~after & ok).sum())
+    if min(n_after, n_before) < 5:
+        return z, None
+    use = ok.copy()
+    step = 0.0
+    for _ in range(4):                                   # clipped least squares
+        X = np.vstack([np.ones(use.sum()), x[use] - 1.0, after[use].astype(float)]).T
+        coef, *_ = np.linalg.lstsq(X, z[use], rcond=None)
+        r = z - (coef[0] + coef[1] * (x - 1.0) + coef[2] * after)
+        s = rsigma(r[use]) or 1e-3
+        new = ok & (np.abs(r) <= 3 * max(s, 1e-4))
+        step = float(coef[2])
+        if (new == use).all():
+            break
+        use = new
+    frac = n_after / float(n_after + n_before)
+    out = np.array(z, dtype=float) - step * after + step * frac
+    return out, step
+
+
+def _expected_mag_noise(ds: Dataset) -> np.ndarray:
+    """Per catalogued star: the median magnitude noise per frame its own light, the sky and read noise give."""
+    n = len(ds.names)
+    if ds.e_per_unit is None or not n:
+        return np.full(n, np.nan)
+    e = ds.star_electrons()
+    sky_e = ds.noise_sky_e()                     # the sky around each star (0.6.0), not the frame's median
+    npix = math.pi * (ds.aperture_px or 8.0) ** 2
+    raw_per_px = ds.raw_sum_px
+    rn2 = (ds.read_noise_e or 0.0) ** 2 * raw_per_px
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rel = np.sqrt(np.abs(e) + npix * (sky_e + rn2)) / e
+    rel = np.where(e > 0, rel, np.nan)
+    return MAG * np.nanmedian(rel, axis=0) if np.isfinite(rel).any() else np.full(n, np.nan)
+
+
+def _seeing(res: NightResult) -> None:
+    ds = res.ds
+    if not ds.px_arcsec:
+        res.lines.append(("info", "Seeing not worked out: the pixel size or focal length is not in the log."))
+        return
+    f = ds.fwhm_px * ds.px_arcsec
+    f = f[np.isfinite(f) & (f > 0)]
+    if f.size < 3:
+        return
+    res.fwhm_arcsec = float(np.median(f))
+    res.fwhm_sigma = rsigma(f)
+    fp = ds.focuspos[np.isfinite(ds.focuspos)]
+    res.focus = float(np.median(fp)) if fp.size else float("nan")
+    res.defocused = res.fwhm_arcsec > DEFOCUS_ARCSEC
+
+
+def _cadence(res: NightResult) -> None:
+    ds = res.ds
+    if ds.cadence is not None or ds.source == "SHOBS-FLUX":
+        # a folder run may measure only runs of its lights: its frames' spacing says less; it wrote the spacing of
+        # all its lights instead
+        c = ds.cadence or {}
+        iv, ex, n = _f(c.get("interval_s")), _f(c.get("exptime_s")), int(_f(c.get("n")) or 0)
+        if iv is not None and ex is not None and n >= 5 and iv - ex >= -0.5:
+            res.overhead_s, res.overhead_n, res.interval_s = max(iv - ex, 0.0), n, iv
+            res.lines.append(("info", f"Frames every {iv:.1f} s for {ex:g} s exposures: {res.overhead_s:.1f} s "
+                                      "between frames (download, save and any delay you set)."))
+        return
+    order = np.argsort(ds.jd)
+    t = ds.jd[order] * 86400.0
+    e = ds.exptime[order]
+    if t.size < 6:
+        return
+    dt = np.diff(t)
+    same = np.isclose(e[1:], e[:-1], rtol=1e-3)
+    dt = dt[same & (dt > 0)]
+    if dt.size < 5:
+        return
+    med = float(np.median(dt))
+    dt = dt[dt <= 2.5 * med]                          # gaps, meridian flips, refocus
+    if dt.size < 5:
+        return
+    oh = float(np.median(dt)) - float(np.median(e))
+    if oh >= -0.5:
+        res.overhead_s, res.overhead_n = max(oh, 0.0), int(dt.size)
+        res.interval_s = float(np.median(dt))
+        res.lines.append(("info", f"Frames every {res.interval_s:.1f} s for {float(np.median(e)):g} s exposures: "
+                                  f"{res.overhead_s:.1f} s between frames (download, save and any delay you set)."))
+
+
+def _sky(res: NightResult, zf) -> None:
+    ds = res.ds
+    jd_mid = float(np.nanmedian(ds.jd)) if ds.jd.size else float("nan")
+    if math.isfinite(jd_mid):
+        res.moon_illum = moon_illumination(jd_mid)
+    if zf is None or not ds.px_arcsec or ds.e_per_unit is None:
+        return
+    area = ds.px_arcsec ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rate = ds.sky * ds.e_per_unit / ds.exptime / area
+        mu = zf - 2.5 * np.log10(np.where(rate > 0, rate, np.nan))
+    mu = mu[np.isfinite(mu)]
+    if mu.size >= 3:
+        res.sky_mag = float(np.median(mu))
+
+
+def _scintillation(res: NightResult, zp, good, aperture_m: float, elevation_m: float) -> None:
+    """C_Y from each bright star's frame-to-frame scatter against the mean of the others."""
+    ds = res.ds
+    if len(good) < 3 or (ds.read_noise_e is None and ds.gain is None):
+        return
+    order = np.argsort(ds.jd)
+    t = ds.exptime[order]
+    x = ds.airmass[order]
+    e_flux = ds.star_electrons()[order][:, good]                          # electrons in the aperture
+    sky_e = ds.noise_sky_e()[order][:, good]                              # e⁻ per measured pixel around each star
+    npix = math.pi * (ds.aperture_px or 8.0) ** 2
+    raw_per_px = ds.raw_sum_px                                            # raw pixels summed per measured pixel
+    rn2 = (ds.read_noise_e or 0.0) ** 2 * raw_per_px
+    with np.errstate(divide="ignore", invalid="ignore"):
+        var_ph = (e_flux + npix * (sky_e + rn2)) / e_flux ** 2           # relative variance per star per frame
+    # point-to-point differences only between TRUE neighbours: a gap (a meridian flip, clouds, or the gap between
+    # two runs of a large folder) of more than 2.5 × the usual spacing is not differenced across
+    gaps = np.diff(ds.jd[order])
+    near = np.isfinite(gaps) & (gaps > 0)
+    if near.sum() >= 2:
+        near &= gaps <= 2.5 * float(np.median(gaps[near]))
+    m = zp[order][:, good]
+    fac = scint_factor(aperture_m, t, x, elevation_m)                     # σ_scint / C_Y per frame
+    est = []
+    n = len(good)
+    for i in range(n):
+        others = [k for k in range(n) if k != i]
+        d = m[:, i] - np.nanmean(m[:, others], axis=1)
+        dd = np.diff(d)
+        ok = np.isfinite(dd) & near
+        if ok.sum() < 10:
+            continue
+        var_obs = (rsigma(dd[ok]) / MAG) ** 2 / 2.0                       # point-to-point: slow drifts cancel
+        ph = np.nanmedian(var_ph[:, i]) + np.nanmedian(np.nansum(var_ph[:, others], axis=1)) / len(others) ** 2
+        f2 = float(np.nanmean(fac ** 2))
+        scint_share = 1.0 + 1.0 / len(others)
+        # which stars can tell is decided by what scintillation SHOULD be (C_Y 1.5), not by the scatter seen, so the
+        # noisy draws of faint stars do not pick themselves (that would bias C_Y high)
+        expect = 1.5 ** 2 * f2 * scint_share
+        if not (math.isfinite(var_obs) and math.isfinite(ph)) or expect < SCINT_MIN_FRACTION * (expect + ph):
+            continue
+        est.append((var_obs - ph) / scint_share / f2)                     # C_Y², may come out below 0
+    if len(est) >= 3 and float(np.median(est)) > 0:
+        res.cy = math.sqrt(float(np.median(est)))
+        if ds.read_noise_e is None:
+            res.lines.append(("info", "The camera's read noise is not known (no camera profile): taken as 0, so C_Y "
+                                      "may read high for short exposures."))
+        res.cy_n = len(est)
+        res.lines.append(("info", f"Scintillation C_Y {res.cy:.2f} from {len(est)} stars (Osborn et al. 2015; "
+                                  f"aperture {aperture_m * 1000:.0f} mm, site {elevation_m:.0f} m)."))
+    else:
+        res.lines.append(("info", "Scintillation not measured: photon noise hides it in these exposures."))
+
+
+# ---- across nights ----------------------------------------------------------------------------------------------------
+
+@dataclass
+class BandSummary:
+    band: str
+    zp1: float = float("nan")
+    zp1_sigma: float = float("nan")
+    zp_nights: list = field(default_factory=list)       # nights used
+    zp_out: dict = field(default_factory=dict)          # "night target" (or a night) → why set aside
+    k: float = float("nan")
+    k_sigma: float = float("nan")
+    k_nights: list = field(default_factory=list)
+    k_source: str = ""
+    fwhm_in_focus: float = float("nan")
+    fwhm_in_focus_sigma: float = float("nan")
+    fwhm_in_focus_n: int = 0
+    fwhm_defocus: dict = field(default_factory=dict)    # key → (value, sigma, n nights)
+    fwhm_imaging: float = float("nan")                  # imaging focus (astrophotography runs), kept apart
+    fwhm_imaging_sigma: float = float("nan")
+    fwhm_imaging_n: int = 0
+    fwhm_imaging_last: str = ""
+    zp_marginal_only: bool = False                      # the zero point rests on marginal (drifting) nights only
+    zp_scale_inexact_only: bool = False                 # ... on logs whose electron scale is not the real one only
+    sky: float = float("nan")
+    sky_sigma: float = float("nan")
+    sky_n: int = 0
+    sky_dark: bool = False
+    cy: float = float("nan")
+    cy_sigma: float = float("nan")
+    cy_n: int = 0
+    last_night: str = ""
+
+
+@dataclass
+class Summary:
+    nights: list                                        # NightResult, newest night first
+    replaced: list                                      # Dataset (older runs of the same night)
+    bands: dict                                         # band → BandSummary
+    overhead_s: float = float("nan")
+    overhead_sigma: float = float("nan")
+    overhead_n: int = 0
+    overhead_runs: int = 0                              # NIGHTS with an overhead (the lowest run of them counts)
+    overhead_from: str = ""
+    camera_ids: list = field(default_factory=list)
+    lines: list = field(default_factory=list)
+
+
+def _by_night(results, value, sigma):
+    """One value per night (several runs that night: weighted mean). [(night, v, s, [results])]."""
+    groups: dict = {}
+    for r in results:
+        groups.setdefault(r.ds.night, []).append(r)
+    out = []
+    for night, rs in sorted(groups.items()):
+        v = [value(r) for r in rs]
+        s = [sigma(r) for r in rs]
+        m, e = wmean(v, s)
+        if math.isfinite(m):
+            out.append((night, m, e if math.isfinite(e) else max(s) if s else float("nan"), rs))
+    return out
+
+
+def _night_medians(results, value, keep=lambda r: True, pair=None) -> list:
+    """One value per night: the median of that night's runs (mosaic panels, or a night read twice, count once).
+    With pair: [(value, median of pair(r))] per night."""
+    groups: dict = {}
+    for r in results:
+        v = value(r)
+        if keep(r) and v is not None and math.isfinite(v):
+            groups.setdefault(r.ds.night, []).append(r)
+    out = []
+    for _night, rs in sorted(groups.items()):
+        v = float(np.median([value(r) for r in rs]))
+        if pair is None:
+            out.append(v)
+        else:
+            p = [pair(r) for r in rs if pair(r) is not None and math.isfinite(pair(r))]
+            out.append((v, float(np.median(p)) if p else float("nan")))
+    return out
+
+
+def _defocus_keys(results: list, profile: dict | None = None) -> None:
+    """Defocused runs keyed by the focuser offset from the same night's in-focus run (else "defocused").
+
+    A run alone on its night has no in-focus partner to compare with. It is judged against the setup's own seeing
+    instead of a flat 7″: the in-focus FWHM of the other nights (else the system profile's) and the size of each
+    known defocus ("+125 steps"). Whichever it is nearest (in ratio) decides: a known defocus within 25 % names it,
+    in focus keeps it in focus, and only with nothing to compare against does the flat DEFOCUS_ARCSEC rule stand.
+
+    Imaging runs (astrophotography, careful focus) take no part: never called defocused, never a reference."""
+    for r in results:
+        if r.imaging:
+            r.defocused, r.defocus_key = False, ""
+    results = [r for r in results if not r.imaging]
+    nights: dict = {}
+    for r in results:
+        if math.isfinite(r.fwhm_arcsec):
+            nights.setdefault((r.ds.night, r.ds.band), []).append(r)     # one band's runs judged together
+    paired = set()                                       # runs judged against a same-night partner
+    for rs in nights.values():
+        # a poor-seeing site: the night's sharpest run is over the flat 7″ but a run far larger (a real defocus)
+        # shows it was in focus
+        low = min(r.fwhm_arcsec for r in rs)
+        if len(rs) > 1 and any(r.fwhm_arcsec > DEFOCUS_RATIO * low for r in rs):
+            for r in rs:
+                if r.fwhm_arcsec <= 1.25 * low:
+                    r.defocused = False
+        infocus = [r for r in rs if not r.defocused]
+        best = min((r.fwhm_arcsec for r in infocus), default=float("nan"))
+        for r in rs:
+            if not r.defocused and math.isfinite(best) and r.fwhm_arcsec > DEFOCUS_RATIO * best:
+                r.defocused = True
+        infocus = [r for r in rs if not r.defocused]
+        for r in rs:
+            if not r.defocused:
+                continue
+            ref = [q.focus for q in infocus if math.isfinite(q.focus)]
+            if ref and math.isfinite(r.focus):
+                off = r.focus - float(np.median(ref))
+                r.defocus_key = f"{int(round(off / 5.0) * 5):+d} steps"
+                paired.add(id(r))
+                paired.update(id(q) for q in infocus)
+            else:
+                r.defocus_key = "defocused"
+    # the setup's own sizes, per band: in focus and each defocus keyed by its offset
+    pbands = (profile or {}).get("bands") or {}
+
+    def pos(v):
+        v = sp._finite(v)
+        return v if v and v > 0 else None
+
+    def refs(band, me):
+        # in focus: runs proven in focus by a same-night defocus partner first, then the profile; runs that are
+        # themselves unproven count only when there is nothing else (they cannot vouch for each other otherwise)
+        inf = [q.fwhm_arcsec for q in results if q is not me and q.ds.band == band and not q.defocused
+               and math.isfinite(q.fwhm_arcsec) and id(q) in paired]
+        f0 = float(np.median(inf)) if inf else pos(sp.value_of((pbands.get(band) or {}).get("fwhm_in_focus")))
+        if not f0:
+            inf = [q.fwhm_arcsec for q in results if q is not me and q.ds.band == band and not q.defocused
+                   and math.isfinite(q.fwhm_arcsec)]
+            f0 = float(np.median(inf)) if inf else None
+        keys: dict = {}
+        for q in results:
+            if q is not me and q.ds.band == band and q.defocused and q.defocus_key.endswith("steps"):
+                keys.setdefault(q.defocus_key, []).append(q.fwhm_arcsec)
+        known = {k: float(np.median(v)) for k, v in keys.items()}
+        for k, rec in ((pbands.get(band) or {}).get("fwhm_defocus") or {}).items():
+            v = pos(sp.value_of(rec))
+            if k.endswith("steps") and v and k not in known:
+                known[k] = v
+        return f0, known
+
+    # every run with no same-night partner (alone on its night, or with no focuser position to pair by) is judged
+    # against the setup's own sizes, all against the same references
+    lone = [r for r in results if math.isfinite(r.fwhm_arcsec) and r.fwhm_arcsec > 0 and id(r) not in paired]
+    judged = [(r, *refs(r.ds.band, r)) for r in lone]
+    for r, f0, known in judged:
+        if not f0 and not known:
+            continue                                       # nothing to compare with: the flat rule stands
+        f = r.fwhm_arcsec
+        cands = ([(abs(math.log(f / f0)), "")] if f0 else []) + [(abs(math.log(f / v)), k) for k, v in known.items()]
+        d, key = min(cands)
+        was = r.defocused
+        if key and d <= math.log(1.25):
+            r.defocused, r.defocus_key = True, key
+            r.lines.append(("info", f"Defocus taken as {key}: no in-focus run that night to measure it from, and its "
+                                    f"stars ({f:.2f}″) are the size of your {key} nights ({known[key]:.2f}″)"
+                                    + (f" rather than your in-focus seeing ({f0:.2f}″)." if f0 else ".")))
+        elif not key:
+            r.defocused, r.defocus_key = False, ""
+            if was:
+                r.lines.append(("info", f"In focus: its stars ({f:.2f}″) are nearer your in-focus seeing "
+                                        f"({f0:.2f}″)" + (" than any defocus you use" if known else "")
+                                        + f", so the flat {DEFOCUS_ARCSEC:g}″ rule does not apply."))
+        else:
+            r.defocused, r.defocus_key = True, "defocused"
+    # a defocused night with no in-focus run to measure the offset from: when it is the size of a defocus already
+    # keyed by its offset in the same band (within 25 %), it is taken to be that one (said in its findings)
+    known: dict = {}
+    for r in results:
+        if r.defocused and r.defocus_key.endswith("steps"):
+            known.setdefault((r.ds.band, r.defocus_key), []).append(r.fwhm_arcsec)
+    for r in results:
+        if not (r.defocused and r.defocus_key == "defocused"):
+            continue
+        near = [(abs(math.log(r.fwhm_arcsec / float(np.median(v)))), key) for (band, key), v in known.items()
+                if band == r.ds.band]
+        if near:
+            d, key = min(near)
+            if d <= math.log(1.25):
+                r.defocus_key = key
+                r.lines.append(("info", f"Defocus taken as {key}: no in-focus run that night to measure it from, "
+                                        f"and its stars are the size of the {key} nights."))
+
+
+def combine(results: list, replaced: list | None = None, old_profile: dict | None = None) -> Summary:
+    """The nights together, per band (see the module text)."""
+    _defocus_keys(results, old_profile)
+    usable = [r for r in results if r.usable]
+    bands: dict = {}
+    for r in usable:
+        bands.setdefault(r.ds.band, []).append(r)
+    out = {}
+    for band, rs in bands.items():
+        bs = BandSummary(band=band)
+        bs.last_night = max((r.ds.night for r in rs), default="")
+        # extinction first (the zero point of nights without their own k uses it)
+        k_rs = [r for r in rs if math.isfinite(r.k)]
+        if any(not r.marginal for r in k_rs):              # marginal nights only when nothing cleaner measured k
+            for r in k_rs:
+                if r.marginal:
+                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (f"marginal: the zero point drifted {r.trend:+.3f} "
+                                                                "mag through the night (left out of the extinction)")
+            k_rs = [r for r in k_rs if not r.marginal]
+        kn = _by_night(k_rs, lambda r: r.k, lambda r: r.k_sigma)
+        if kn:
+            keep = clipped([v for _, v, _, _ in kn], [s for _, _, s, _ in kn])
+            bs.k, bs.k_sigma = wmean([v for (_, v, _, _), k in zip(kn, keep) if k],
+                                     [s for (_, _, s, _), k in zip(kn, keep) if k])
+            bs.k_nights = [n for (n, _, _, _), k in zip(kn, keep) if k]
+            bs.k_source = "measured"
+            for r in rs:
+                if not math.isfinite(r.k) and math.isfinite(r.zp_mean):
+                    r.k_used, r.k_used_source = bs.k, "all nights"
+                    r.zp1 = r.zp_mean + bs.k * (r.x_mean - 1.0)
+                    r.zp1_sigma = max(r.rms / math.sqrt(max(r.n_frames, 1)), ZP_FLOOR) + \
+                        (bs.k_sigma if math.isfinite(bs.k_sigma) else 0.02) * abs(r.x_mean - 1.0)
+        # zero point: photometric nights only, each night once, clipped across nights
+        for r in rs:
+            if math.isfinite(r.zp1) and not r.photometric:
+                bs.zp_out[f"{r.ds.night} {r.ds.target}"] = ("too short to judge the sky" if r.too_short else
+                                                            "not photometric (clouds or haze)")
+        phot = [r for r in rs if r.photometric and math.isfinite(r.zp1)]
+        # an older SHOBS-P log (format 1) leaves the master flat's factor out of its electron scale (~0.4 mag faint
+        # on an OSC): when any night has the real scale, those nights are set aside from the zero point (their
+        # extinction, seeing, sky and C_Y do not depend on the scale and still count). This comes BEFORE the
+        # marginal rule: a drifting night with the real scale beats a clean night 0.4 mag off.
+        if any(r.ds.scale_exact for r in phot):
+            for r in phot:
+                if not r.ds.scale_exact:
+                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (
+                        "its electron scale is not the real one (" + SCALE_REASON.get(r.ds.scale, "not known")
+                        + "): left out of the zero point")
+            phot = [r for r in phot if r.ds.scale_exact]
+        elif phot:
+            bs.zp_scale_inexact_only = True
+        if any(not r.marginal for r in phot):              # a drifting night is set aside when a clean one is there
+            for r in phot:
+                if r.marginal:
+                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (f"marginal: the zero point drifted {r.trend:+.3f} mag "
+                                                                "through the night (left out of the zero point"
+                                                                + (" and extinction)" if math.isfinite(r.k) else ")"))
+            phot = [r for r in phot if not r.marginal]
+        elif phot:
+            bs.zp_marginal_only = True
+        zn = _by_night(phot, lambda r: r.zp1, lambda r: r.zp1_sigma)
+        if zn:
+            keep = clipped([v for _, v, _, _ in zn], [s for _, _, s, _ in zn])
+            for (n, v, _, _), k in zip(zn, keep):
+                if not k:
+                    bs.zp_out[n] = f"disagrees with the other nights ({v:.2f})"
+            if len(zn) == 2 and abs(zn[0][1] - zn[1][1]) > 5 * math.hypot(zn[0][2], zn[1][2]):
+                bs.zp_out["(two nights)"] = (f"the only two photometric nights disagree by "
+                                             f"{abs(zn[0][1] - zn[1][1]):.2f} mag: both kept until a third decides")
+            bs.zp1, bs.zp1_sigma = wmean([v for (_, v, _, _), k in zip(zn, keep) if k],
+                                         [s for (_, _, s, _), k in zip(zn, keep) if k])
+            bs.zp_nights = [n for (n, _, _, _), k in zip(zn, keep) if k]
+        # seeing: each night once (several runs that night, e.g. mosaic panels: their median first). Imaging-focus
+        # runs (astrophotography) are a value of their own, never the photometry seeing.
+        inf = _night_medians(rs, lambda r: r.fwhm_arcsec, lambda r: not r.defocused and not r.imaging)
+        if inf:
+            bs.fwhm_in_focus, bs.fwhm_in_focus_sigma, bs.fwhm_in_focus_n = float(np.median(inf)), rsigma(inf), len(inf)
+        img = _night_medians(rs, lambda r: r.fwhm_arcsec, lambda r: r.imaging)
+        if img:
+            bs.fwhm_imaging, bs.fwhm_imaging_sigma, bs.fwhm_imaging_n = float(np.median(img)), rsigma(img), len(img)
+            bs.fwhm_imaging_last = max(r.ds.night for r in rs if r.imaging and math.isfinite(r.fwhm_arcsec))
+        bs.fwhm_defocus = {}
+        for dk in sorted({r.defocus_key or "defocused" for r in rs if r.defocused and math.isfinite(r.fwhm_arcsec)}):
+            v = _night_medians(rs, lambda r: r.fwhm_arcsec,
+                               lambda r, dk=dk: r.defocused and (r.defocus_key or "defocused") == dk)
+            bs.fwhm_defocus[dk] = (float(np.median(v)), rsigma(v), len(v))
+        # sky: the dark nights when there are any (each night once)
+        sk = _night_medians(rs, lambda r: r.sky_mag, pair=lambda r: r.moon_illum)
+        dark = [s for s, m in sk if math.isfinite(m) and m < DARK_MOON]
+        use = dark or [s for s, _ in sk]
+        if use:
+            bs.sky, bs.sky_sigma, bs.sky_n, bs.sky_dark = float(np.median(use)), rsigma(use), len(use), bool(dark)
+        cys = _night_medians(rs, lambda r: r.cy)
+        if cys:
+            bs.cy, bs.cy_sigma, bs.cy_n = float(np.median(cys)), rsigma(cys), len(cys)
+        out[band] = bs
+    s = Summary(nights=sorted(results, key=lambda r: (r.ds.night, r.ds.written), reverse=True),
+                replaced=list(replaced or []), bands=out)
+    # the overhead per frame: the LOWEST run's value. The headers cannot tell a delay set in the capture software
+    # (e.g. 30 s between 0.75 s frames) from the download and save time, and a delay only ever adds to it.
+    oh = [(r.overhead_s, r.overhead_n, r) for r in usable if math.isfinite(r.overhead_s)]
+    if oh:
+        v, n, best = min(oh, key=lambda t: t[0])
+        s.overhead_s, s.overhead_n, s.overhead_runs = v, n, len({r.ds.night for _v, _n, r in oh})
+        s.overhead_from = f"{best.ds.night} {best.ds.target}, {best.exptime_s:g} s exposures"
+    s.camera_ids = sorted({r.ds.camera_id for r in results})
+    return s
+
+
+def k_prior_from(profile: dict | None, band: str) -> tuple | None:
+    """The system profile's measured extinction for a band, as (k, "profile"), or None."""
+    rec = (((profile or {}).get("bands") or {}).get(band) or {}).get("extinction_k")
+    v = sp.value_of(rec)
+    if v is not None and rec.get("source") in ("measured", "user"):
+        return float(v), "profile"
+    return None
+
+
+def run_all(datasets: list, profile: dict | None = None, aperture_mm=None, elevation_m=None,
+            step=None) -> Summary:
+    """Analyse every dataset (newest per night only) and combine."""
+    kept, replaced = newest_per_night(datasets)
+    results = []
+    for i, ds in enumerate(sorted(kept, key=lambda d: d.night)):
+        if step:
+            step(f"Night {i + 1} of {len(kept)}: {ds.label}")
+        results.append(analyse(ds, k_prior_from(profile, ds.band), aperture_mm, elevation_m))
+    return combine(results, replaced, profile)
+
+
+def read_logs(paths: list, cam_lookup=None) -> tuple[list, list]:
+    """(datasets, problems [(path, why)]) for a list of log files."""
+    good, bad = [], []
+    for p in paths:
+        try:
+            good.append(load_dataset(p, cam_lookup))
+        except OnSkyError as exc:
+            bad.append((p, str(exc)))
+        except Exception as exc:                          # a damaged file never stops the run
+            bad.append((p, f"{type(exc).__name__}: {exc}"))
+    return good, bad
+
+
+# ---- the system profile -----------------------------------------------------------------------------------------------
+
+def _rnd(v, nd):
+    return round(float(v), nd) if v is not None and math.isfinite(v) else None
+
+
+def _nights_word(nights: list) -> str:
+    if not nights:
+        return ""
+    if len(nights) == 1:
+        return f"1 night ({nights[0]})"
+    return f"{len(nights)} nights ({min(nights)} to {max(nights)})"
+
+
+def _catalog_words(s: Summary, band: str) -> str:
+    srcs = set()
+    for r in s.nights:
+        if r.ds.band == band and r.photometric:
+            srcs.add(r.ds.catalog_service.split(" (")[0] if r.ds.catalog_service else
+                     ("SHOBS-P's catalogs" if r.ds.source == "SHOBS-P" else "the folder run's catalog"))
+    return ", ".join(sorted(srcs)) or "the logs' catalogs"
+
+
+def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict]:
+    """({band: {key: record or {defocus key: record}}}, {"overhead_s": record}) for what the nights measured."""
+    bands = {}
+    for band, b in s.bands.items():
+        recs = {}
+        if math.isfinite(b.zp1):
+            recs["zero_point"] = sp.record(
+                _rnd(b.zp1, 3), "mag for 1 e-/s", "measured", sigma=_rnd(b.zp1_sigma, 3), n=len(b.zp_nights),
+                date=max(b.zp_nights), conditions=_nights_word(b.zp_nights), run=run_key,
+                note="at airmass 1; " + ("marginal (drifting) nights only: no clean photometric night yet; "
+                                      if b.zp_marginal_only else "photometric nights only; ")
+                     + ("from logs whose electron scale leaves out the flat (older SHOBS-P) or is a lower limit, "
+                        "so it may be too faint; " if b.zp_scale_inexact_only else "")
+                     + "catalogued field stars from " + _catalog_words(s, band))
+        if math.isfinite(b.k):
+            recs["extinction_k"] = sp.record(_rnd(b.k, 3), "mag/airmass", "measured", sigma=_rnd(b.k_sigma, 3),
+                                             n=len(b.k_nights), date=max(b.k_nights),
+                                             conditions=_nights_word(b.k_nights), run=run_key)
+        if math.isfinite(b.sky):
+            recs["sky_brightness"] = sp.record(
+                _rnd(b.sky, 2), "mag/arcsec2", "measured", sigma=_rnd(b.sky_sigma, 2), n=b.sky_n, date=b.last_night,
+                conditions="Moon under 25 % lit" if b.sky_dark else "all nights (none with a dark Moon yet)",
+                run=run_key, note="median of the nights' medians")
+        if math.isfinite(b.fwhm_in_focus):
+            recs["fwhm_in_focus"] = sp.record(_rnd(b.fwhm_in_focus, 2), "arcsec", "measured",
+                                              sigma=_rnd(b.fwhm_in_focus_sigma, 2), n=b.fwhm_in_focus_n,
+                                              date=b.last_night, conditions="median of the nights' medians",
+                                              run=run_key)
+        if math.isfinite(b.fwhm_imaging):
+            recs["fwhm_imaging"] = sp.record(_rnd(b.fwhm_imaging, 2), "arcsec", "measured",
+                                             sigma=_rnd(b.fwhm_imaging_sigma, 2), n=b.fwhm_imaging_n,
+                                             date=b.fwhm_imaging_last or b.last_night,
+                                             conditions="imaging focus (astrophotography): median of the nights' "
+                                             "medians", run=run_key,
+                                             note="kept apart from the photometry seeing; never the in-focus "
+                                             "reference for defocus")
+        if b.fwhm_defocus:
+            recs["fwhm_defocus"] = {k: sp.record(_rnd(v, 2), "arcsec", "measured", sigma=_rnd(sg, 2), n=n,
+                                                 date=b.last_night, conditions="median of the nights' medians",
+                                                 run=run_key, note="defocus offset from the same night's in-focus run"
+                                                 if k != "defocused" else "offset from focus not known")
+                                    for k, (v, sg, n) in b.fwhm_defocus.items()}
+        if math.isfinite(b.cy):
+            recs["scintillation_cy"] = sp.record(_rnd(b.cy, 2), "Young C_Y", "measured", sigma=_rnd(b.cy_sigma, 2),
+                                                 n=b.cy_n, date=b.last_night,
+                                                 conditions="Osborn et al. 2015 modified Young", run=run_key)
+        if recs:
+            bands[band] = recs
+    cad = {}
+    last = max((r.ds.night for r in s.nights), default=None)
+    if math.isfinite(s.overhead_s):
+        cad["overhead_s"] = sp.record(_rnd(s.overhead_s, 2), "s", "measured", n=s.overhead_n, date=last,
+                                      conditions=f"lowest of {s.overhead_runs} "
+                                      f"night{'s' if s.overhead_runs != 1 else ''}"
+                                      f" ({s.overhead_from})", run=run_key,
+                                      note="time between frames minus the exposure (gaps left out); a delay set in "
+                                      "the capture software only adds to it, so the lowest run counts")
+    return bands, cad
+
+
+LABELS = {"zero_point": ("Zero point", "mag (1 e⁻/s)", 3), "extinction_k": ("Extinction", "mag/airmass", 3),
+          "sky_brightness": ("Sky", "mag/″²", 2), "fwhm_in_focus": ("Seeing in focus", "″", 2),
+          "fwhm_defocus": ("Defocused", "″", 2), "fwhm_imaging": ("Seeing, imaging focus", "″", 2), "scintillation_cy": ("Scintillation C_Y", "", 2),
+          "overhead_s": ("Overhead per frame", "s", 2)}
+
+
+def changes_for(s: Summary, doc: dict | None, telescope: dict | None = None) -> list:
+    """[(label, old value, old source, new value, unit, decimals)] for the save dialog. telescope: what the nights'
+    headers say ({"focal_header", "telescop_header"}); a change there is listed too (apply_to_profile refreshes it)."""
+    bands, cad = measured_records(s)
+    out = []
+    old_t = (doc or {}).get("telescope") or {}
+    if doc is not None and telescope:
+        f_new, f_old = sp._finite(telescope.get("focal_header")), sp._finite(old_t.get("focal_header"))
+        if f_new is not None and f_new != f_old:
+            out.append(("Telescope: Focal length in the header", f_old, "header", f_new, "mm", 0))
+        t_new = telescope.get("telescop_header")
+        if t_new and t_new != old_t.get("telescop_header"):
+            out.append(("Telescope: TELESCOP in the header", old_t.get("telescop_header"), "header", t_new, "", 0))
+    for band, recs in bands.items():
+        old_b = (((doc or {}).get("bands") or {}).get(band) or {})
+        for key, r in recs.items():
+            label, unit, nd = LABELS.get(key, (key, "", 3))
+            if key == "fwhm_defocus":
+                for dk, dr in r.items():
+                    o = (old_b.get("fwhm_defocus") or {}).get(dk) or {}
+                    out.append((f"{BAND_WORDS.get(band, band)}: {label} {dk}", o.get("value"),
+                                o.get("source", "none"), dr["value"], unit, nd))
+                continue
+            o = old_b.get(key) or {}
+            out.append((f"{BAND_WORDS.get(band, band)}: {label}", o.get("value"), o.get("source", "none"),
+                        r["value"], unit, nd))
+    for key, r in cad.items():
+        label, unit, nd = LABELS[key]
+        o = (((doc or {}).get("cadence") or {}).get(key)) or {}
+        out.append((label, o.get("value"), o.get("source", "none"), r["value"], unit, nd))
+    return out
+
+
+def new_system_profile(system_id: str, cam_id: str, telescope: dict, written_by: str, setup: dict | None = None) -> dict:
+    """A new, empty system profile (format v1)."""
+    now = sp.now_iso()
+    focal = sp._finite(telescope.get("focal_mm"))
+    pix = sp._finite((setup or {}).get("pixel_um"))
+    doc = {
+        "format": sp.SYSTEM_FORMAT, "format_version": sp.FORMAT_VERSION, "profile_id": system_id, "revision": 1,
+        "written_by": written_by, "created": now, "updated": now, "camera_profile": cam_id,
+        "telescope": {"name": telescope.get("name") or "", "aperture_mm": sp._finite(telescope.get("aperture_mm")),
+                      "focal_mm": focal, "focal_header": sp._finite(telescope.get("focal_header")),
+                      "telescop_header": telescope.get("telescop_header"),
+                      "telescop_header_ignored": "mount name, not a telescope" if telescope.get("telescop_header")
+                      else None,
+                      "central_obstruction_fraction": None, "mount": None},
+        "site": "uses each app's own site setting (never stored here)",
+        "plate_scale": {}, "bands": {}, "cadence": {},
+        "learning": {"outlier_rejection": f"sigma-clip {CLIP_SIGMA} across nights",
+                     "min_nights_for_measured": 1},
+    }
+    if focal and pix:
+        doc["plate_scale"]["raw_arcsec_per_px"] = sp.record(
+            round(206.264806 * pix / focal, 4), "arcsec/px", "derived",
+            note=f"206.265 x {pix:g} um / {focal:g} mm")
+    return doc
+
+
+def apply_to_profile(s: Summary, doc: dict | None, written_by: str, run_key: str | None = None,
+                     keep_user: bool = False, system_id: str = "", cam_id: str = "", telescope: dict | None = None,
+                     setup: dict | None = None) -> dict:
+    """The system profile with these nights in it (a new one when doc is None). keep_user keeps values you typed.
+    A value the nights did not measure is left as it was."""
+    if doc is None:
+        doc = new_system_profile(system_id, cam_id, telescope or {}, written_by, setup)
+    else:
+        doc = copy.deepcopy(doc)
+        tel = doc.setdefault("telescope", {})
+        for k in ("name", "aperture_mm"):
+            if telescope and telescope.get(k) not in (None, "") and tel.get(k) in (None, ""):
+                tel[k] = telescope[k]
+        # what the frames' headers say is refreshed from these nights (0.6.0: it kept the first run's FOCALLEN and
+        # TELESCOP for ever); the profile's own focal length (its id) stays as it is
+        if telescope and sp._finite(telescope.get("focal_header")) is not None:
+            tel["focal_header"] = sp._finite(telescope.get("focal_header"))
+        if telescope and telescope.get("telescop_header"):
+            tel["telescop_header"] = telescope["telescop_header"]
+            tel["telescop_header_ignored"] = "mount name, not a telescope"
+    bands, cad = measured_records(s, run_key)
+    for band, recs in bands.items():
+        slot = doc.setdefault("bands", {}).setdefault(band, {})
+        for key, r in recs.items():
+            if key == "fwhm_defocus":
+                fd = slot.setdefault("fwhm_defocus", {})
+                for dk, dr in r.items():
+                    if keep_user and (fd.get(dk) or {}).get("source") == "user":
+                        continue
+                    fd[dk] = dr
+                continue
+            if keep_user and (slot.get(key) or {}).get("source") == "user":
+                continue
+            slot[key] = r
+    for key, r in cad.items():
+        c = doc.setdefault("cadence", {})
+        if keep_user and (c.get(key) or {}).get("source") == "user":
+            continue
+        c[key] = r
+    doc.setdefault("learning", {})["last_onsky_run"] = run_key
+    return doc
+
+
+def night_values(r: NightResult, system_id: str) -> list:
+    """One night's numbers for the run history (date = the night), so the History page can trend them."""
+    rows = []
+
+    def add(key, v, unit, sigma=None):
+        if v is not None and math.isfinite(v):
+            rows.append({"key": key, "value": float(v), "sigma": sigma if sigma is None or math.isfinite(sigma)
+                         else None, "unit": unit, "source": "measured", "channel": r.ds.band,
+                         "profile_id": system_id, "date": r.ds.night})
+    if r.ds.scale_exact:
+        if r.photometric:
+            add("bands.zero_point", r.zp1, "mag for 1 e-/s", r.zp1_sigma)
+        add("bands.zero_point_at_x", r.zp_mean, "mag for 1 e-/s")
+    elif r.photometric:      # an older log's scale (flat left out) or a lower limit: a trend of its own, never mixed
+        add("bands.zero_point_low_scale", r.zp1, "mag for 1 e-/s", r.zp1_sigma)
+    add("bands.extinction_k", r.k, "mag/airmass", r.k_sigma)
+    add("bands.sky_brightness", r.sky_mag, "mag/arcsec2")
+    add("bands.fwhm_imaging" if r.imaging else "bands.fwhm_defocus" if r.defocused else "bands.fwhm_in_focus",
+        r.fwhm_arcsec, "arcsec", r.fwhm_sigma)
+    add("bands.scintillation_cy", r.cy, "Young C_Y")
+    add("cadence.overhead_s", r.overhead_s, "s")
+    add("cadence.interval_s", r.interval_s, "s")
+    return rows
+
+
+def night_summary(r: NightResult) -> dict:
+    def n(v, nd=4):
+        return round(v, nd) if v is not None and math.isfinite(v) else None
+    worst = r.worst
+    return {"night": r.ds.night, "target": r.ds.target, "band": r.ds.band, "log": os.path.basename(r.ds.path),
+            "written_by": r.ds.written_by, "frames": r.n_frames, "stars_used": r.stars_used,
+            "stars_out": r.stars_out, "zp1": n(r.zp1), "zp1_sigma": n(r.zp1_sigma), "zp_at_x": n(r.zp_mean),
+            "x_mean": n(r.x_mean, 3), "k": n(r.k), "k_used": n(r.k_used), "k_used_source": r.k_used_source,
+            "photometric": r.photometric, "marginal": r.marginal, "trend": n(r.trend), "bin_rms": n(r.bin_rms), "fwhm_arcsec": n(r.fwhm_arcsec, 3),
+            "defocus": r.defocus_key if r.defocused else "", "sky": n(r.sky_mag, 3), "moon": n(r.moon_illum, 3),
+            "cy": n(r.cy, 3), "overhead_s": n(r.overhead_s, 3), "why_not": r.why_not, "frames_are": r.ds.frames_are,
+            "log_version": r.ds.log_version, "electron_scale": r.ds.scale,
+            "worst": worst if worst else ("⚠ not photometric" if r.usable and not r.photometric else "")}

@@ -749,7 +749,8 @@ class BinaryStarReduction:
                             bounds=((-5, 5), (-5, 5)))
             dx, dy = result.x
             return float(dx), float(dy)
-        except:
+        except (ValueError, RuntimeError, Exception) as e:
+            logger.debug(f"Centroid shift failed: {e}")
             return 0.0, 0.0
     
     def eli_lucky_imaging(self, image_files: List[Path],
@@ -836,7 +837,8 @@ class BinaryStarReduction:
             try:
                 clipped = sigma_clip(stack_array, axis=0, sigma=3.0)
                 stacked = np.ma.median(clipped, axis=0).filled(np.nanmedian(stack_array, axis=0))
-            except:
+            except (ValueError, Exception) as e:
+                logger.debug(f"sigma_clip failed, using median: {e}")
                 # Fallback si sigma_clip échoue
                 stacked = np.median(stack_array, axis=0)
         else:

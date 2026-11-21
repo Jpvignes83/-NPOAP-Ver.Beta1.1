@@ -1,6 +1,8 @@
 import json
 import os
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Callable, Tuple
 from dataclasses import dataclass
 import shutil
@@ -15,13 +17,65 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 
+
+def run_plate_solve_parallel(
+    items: list[Path],
+    work_one: Callable[[Path], None],
+    *,
+    max_workers: int,
+    progress_callback: Optional[Callable[[int], None]] = None,
+    pipeline_control=None,
+    log_prefix: str = "Plate-solve",
+) -> None:
+    """
+    Lance work_one(path) sur plusieurs FITS en parallèle (pause/stop respectés au début de chaque tâche).
+    La progression est mise à jour après chaque fichier réellement traité (pas les tâches annulées par Stop).
+    """
+    total = len(items)
+    if total == 0:
+        return
+    mw = max(1, min(max(1, max_workers), total))
+    completed = 0
+    lock = threading.Lock()
+
+    def work(p: Path) -> None:
+        nonlocal completed
+        if pipeline_control is not None:
+            pipeline_control.wait_if_paused()
+            if pipeline_control.should_stop():
+                return
+        try:
+            work_one(p)
+        except Exception as e:
+            logger.error("%s — échec sur %s : %s", log_prefix, p.name, e)
+        with lock:
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(min(100, int(completed / total * 100)))
+
+    with ThreadPoolExecutor(max_workers=mw) as ex:
+        futures = [ex.submit(work, p) for p in items]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception:
+                pass
+
+
 class AstrometrySolverNova:
-    def __init__(self, api_key_file: str | Path | None = None, output_dir: str | Path | None = None, downsample_factor: int = 1):
+    def __init__(
+        self,
+        api_key_file: str | Path | None = None,
+        output_dir: str | Path | None = None,
+        downsample_factor: int = 1,
+        parallel_workers: int = 4,
+    ):
         self.api_url = "https://nova.astrometry.net/api"
         self.output_dir = Path(output_dir) if output_dir else Path.cwd()
         self.api_key_file = Path(api_key_file) if api_key_file else Path.home() / ".astrometry_api_key"
         self.api_key = self._load_api_key()
         self.downsample_factor = downsample_factor
+        self.parallel_workers = max(1, int(parallel_workers))
 
     # -------------------------------------------------------------------
     # HELPERS
@@ -283,22 +337,25 @@ class AstrometrySolverNova:
     # -------------------------------------------------------------------
     def solve_directory(self, directory: Path, progress_callback=None, pipeline_control=None):
         """
-        Résout chaque FITS du répertoire, une image après l'autre.
-        Une seule source de pourcentage (fin de fichier) pour une barre monotone côté UI.
+        Résout les FITS du répertoire en parallèle (jusqu'à ``parallel_workers`` à la fois).
+        Progression : une mise à jour par fichier terminé (compatible barre monotone côté UI).
         """
         files = sorted(directory.glob("*.fits"))
-        total = len(files)
-        if total == 0:
+        if not files:
             return
-        for i, f in enumerate(files):
-            if pipeline_control is not None:
-                pipeline_control.wait_if_paused()
-                if pipeline_control.should_stop():
-                    logger.info("Astrométrie NOVA interrompue par l'utilisateur.")
-                    return
-            self.solve_file(f, progress_callback=None)
-            if progress_callback:
-                progress_callback(int((i + 1) / total * 100))
+        logger.info(
+            "NOVA : %d fichier(s), jusqu'à %d résolutions en parallèle.",
+            len(files),
+            self.parallel_workers,
+        )
+        run_plate_solve_parallel(
+            files,
+            lambda p: self.solve_file(p, None),
+            max_workers=self.parallel_workers,
+            progress_callback=progress_callback,
+            pipeline_control=pipeline_control,
+            log_prefix="NOVA",
+        )
 
 @dataclass
 class SolverConfig:
@@ -307,7 +364,9 @@ class SolverConfig:
     scale_high: float = 2.0     # Echelle max (arcsec/pix)
     downsample: int = 2         # Réduction de l'image pour accélérer
     timeout: int = 300          # Temps max en secondes (augmenté à 5 min)
-    cpulimit: int = 120         # Temps CPU max (augmenté à 2 min)
+    cpulimit: int = 600         # Temps CPU max par image (solve-field ; défaut astrometry ~600 s)
+    omp_threads: int = 4        # Threads OpenMP par solve-field (WSL), voir parallel_workers
+    parallel_workers: int = 2   # Images en parallèle (LOCAL WSL : 2 évite saturation mémoire/CPU)
     retry_on_failure: bool = True  # Réessayer en cas d'échec
     max_retries: int = 1        # Nombre max de tentatives
 
@@ -483,9 +542,12 @@ class AstrometrySolverLocal:
                 linux_solution_name = f"{temp_fits.stem}.new"
                 linux_solution_path = f"/tmp/{linux_solution_name}"
                 
-                # 1. Création de la commande Linux
+                # 1. Création de la commande Linux (OMP_NUM_THREADS : parallélisme interne solve-field)
+                nt = max(1, int(self.config.omp_threads))
                 linux_cmd_str = (
-                    f" unset LD_LIBRARY_PATH; /usr/bin/solve-field --overwrite --no-plots --no-verify "
+                    f" unset LD_LIBRARY_PATH; "
+                    f"export OMP_NUM_THREADS={nt}; "
+                    f"/usr/bin/solve-field --overwrite --no-plots --no-verify "
                     f"--temp-dir /tmp --dir /tmp "
                     f"--scale-units arcsecperpix --scale-low {self.config.scale_low} "
                     f"--scale-high {self.config.scale_high} "
@@ -495,7 +557,10 @@ class AstrometrySolverLocal:
                 )
                 
                 cmd = ["wsl", "bash", "-l", "-c", linux_cmd_str]
-                logger.info(f"Exécution solve-field via WSL (timeout={current_timeout}s, downsample={current_downsample})…")
+                logger.info(
+                    f"Exécution solve-field via WSL (timeout={current_timeout}s, "
+                    f"downsample={current_downsample}, OMP_NUM_THREADS={nt})…"
+                )
 
                 if progress_callback: progress_callback(30)
 
@@ -574,6 +639,17 @@ class AstrometrySolverLocal:
                          # Affiche la dernière partie du log pour le diagnostic
                         log_end = result.stdout[-300:] 
                         logger.warning(f"Log solveur : {log_end}")
+                        if "Total CPU time limit reached" in (result.stdout or ""):
+                            logger.warning(
+                                "   Limite CPU solve-field atteinte (--cpulimit=%ds). "
+                                "Relancez ou augmentez cpulimit dans SolverConfig.",
+                                self.config.cpulimit,
+                            )
+                        elif "Did not solve" in (result.stdout or ""):
+                            logger.warning(
+                                "   Champ non résolu : vérifiez échelle pixel (scale-low/high), "
+                                "index astrometry (/usr/share/astrometry/data) et qualité de l'image."
+                            )
                     if attempt < max_attempts - 1:
                         continue  # Réessayer
                     return False

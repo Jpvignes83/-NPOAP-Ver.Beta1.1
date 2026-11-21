@@ -1,65 +1,113 @@
 # Installation de KBMOD sous WSL (Windows Subsystem for Linux)
 
-NPOAP sur Windows n?installe pas KBMOD (compilation difficile sous MSVC). La d?tection KBMOD est lanc?e **via WSL** : le script `scripts/kbmod_wsl_detect.py` s?ex?cute dans l?environnement Linux et ?crit les candidats dans `kbmod_candidates.csv`, que NPOAP lit ensuite.
+NPOAP sur Windows n'installe pas KBMOD (compilation difficile sous MSVC).  
+La detection KBMOD est lancee via WSL avec `scripts/kbmod_wsl_detect.py`, qui ecrit les candidats dans `kbmod_candidates.csv`.
 
-## Pr?requis
+## Prerequis
 
-- **WSL 2** avec une distribution Linux (Ubuntu recommand?e).
-- **GPU NVIDIA** (optionnel mais recommand? pour des temps de calcul raisonnables).
-- **CUDA** install? sous WSL si vous utilisez le GPU (voir [NVIDIA CUDA on WSL](https://docs.nvidia.com/cuda/wsl-user-guide/)).
+- WSL 2 avec une distribution Linux (Ubuntu recommandee)
+- GPU NVIDIA (optionnel mais recommande)
+- CUDA sous WSL si vous utilisez le GPU
 
-## ?tapes d?installation sous WSL
+## Installation automatique (Windows)
 
-### 1. Ouvrir un terminal WSL
+Double-cliquez sur **`install_kbmod_wsl.bat`** à la racine du projet (depuis une copie déjà décompressée). Par défaut, KBMOD est installé **uniquement** dans l’environnement conda **`astroenv`** (`.../envs/astroenv/bin/python3`), pas dans le Python système Ubuntu.
 
-Dans PowerShell ou CMD : `wsl`  
-Ou lancez ? Ubuntu ? (ou votre distribution) depuis le menu D?marrer.
+Le script :
 
-### 2. Mettre ? jour le syst?me
+1. vérifie que WSL est disponible ;
+2. convertit le chemin Windows vers Linux (`wslpath`) ;
+3. exécute **`scripts/install_kbmod_wsl.sh`** : `apt install` des outils de build (sauf **`install_kbmod_wsl.bat skip-apt`**), clone récursif de KBMOD dans `~/kbmod`, puis **`pip install -e`** dans **`astroenv`** avec **`coverage>=7.6.1`** pour Numba.
+
+Mot de passe **sudo** possible dans la fenêtre WSL pour les paquets système.
+
+### conda **astroenv** (comportement par défaut)
+
+Sans argument (ou avec le mot **`astroenv`**), recherche du premier chemin parmi **`~/miniconda3`**, **`~/mambaforge`**, **`~/miniforge3`**, **`~/anaconda3`**, env **`astroenv`**. **`KBMOD_WSL_PYTHON`** dans `config.py` doit être ce même chemin (affiché à la fin du script).
+
+```bat
+install_kbmod_wsl.bat
+install_kbmod_wsl.bat skip-apt
+install_kbmod_wsl.bat /home/VOTREUSER/miniconda3/envs/astroenv/bin/python3
+```
+
+### Retirer une ancienne installation dans `~/.local` (Python système)
+
+Si vous aviez installé KBMOD avec **`/usr/bin/python3`**, désinstallez-la pour ne garder que **`astroenv`** :
+
+```bash
+/usr/bin/python3 -m pip uninstall -y kbmod coverage
+```
+
+Ou sous Windows avant le `.bat` : **`set KBMOD_PURGE_USER_KBMOD=1`** puis relancer **`install_kbmod_wsl.bat`** (le script lance cette désinstallation automatiquement avant la vérification d’import).
+
+### Python système Ubuntu (optionnel, non recommandé avec NPOAP conda)
+
+Pour forcer **`/usr/bin/python3`** (ou le premier **`python3`** du PATH) :
+
+```bat
+install_kbmod_wsl.bat system
+```
+
+Si la détection depuis NPOAP échoue avec « No module named 'kbmod' », **`KBMOD_WSL_PYTHON`** dans `config.py` doit être **exactement** l’interpréteur affiché à la fin du script.
+
+## Etapes d'installation manuelle
+
+### 1) Ouvrir WSL
+
+Depuis PowerShell/CMD:
+
+```powershell
+wsl
+```
+
+### 2) Mettre a jour Linux
 
 ```bash
 sudo apt update
 sudo apt upgrade -y
 ```
 
-### 3. Installer les outils de compilation et Python
+### 3) Installer les outils de build
 
 ```bash
-sudo apt install -y build-essential cmake python3-dev python3-pip python3-venv
+sudo apt install -y build-essential cmake python3-dev python3-pip python3-venv git
 ```
 
-### 4. (Optionnel) Installer CUDA sous WSL
+### 4) (Optionnel) Installer CUDA sous WSL
 
-Si vous avez un GPU NVIDIA et les pilotes Windows ? jour (avec support WSL), vous pouvez installer le toolkit CUDA dans WSL :
+Suivez la doc NVIDIA: <https://docs.nvidia.com/cuda/wsl-user-guide/>
 
-- Suivez la documentation NVIDIA : [CUDA on WSL](https://docs.nvidia.com/cuda/wsl-user-guide/).
-- Ou installez via le d?p?t NVIDIA :
+Exemple Ubuntu:
 
 ```bash
-# Exemple pour Ubuntu 22.04 ; adapter selon votre version
 wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt update
 sudo apt install -y cuda-toolkit
 ```
 
-Red?marrez WSL si n?cessaire (`wsl --shutdown` dans PowerShell, puis rouvrez WSL).
+Si besoin, redemarrez WSL:
 
-### 5. Cloner et installer KBMOD
+1. Quittez WSL: `exit`
+2. Dans **PowerShell/CMD Windows (hors WSL)**:
 
-**Important** : KBMOD utilise des **sous-modules Git** (pybind11, etc.). Il faut cloner avec `--recursive`, sinon CMake signale ? The source directory .../lib/pybind11 does not contain a CMakeLists.txt ? et ? Unknown CMake command pybind11_add_module ?.
+```powershell
+wsl --shutdown
+```
+
+3. Rouvrez WSL (`wsl` ou `wsl -d Ubuntu`)
+
+### 5) Cloner KBMOD avec sous-modules
 
 ```bash
 cd ~
 git clone --recursive https://github.com/dirac-institute/kbmod.git
 cd kbmod
 pip3 install --user -e .
-# ou dans un venv :
-# python3 -m venv venv && source venv/bin/activate
-# pip install -e .
 ```
 
-**Si vous avez d?j? clon? sans `--recursive`** : dans le dossier `kbmod`, ex?cutez :
+Si vous avez deja clone sans `--recursive`:
 
 ```bash
 cd ~/kbmod
@@ -67,66 +115,37 @@ git submodule update --init --recursive
 pip3 install --user -e .
 ```
 
-**Scripts dans `~/.local/bin`** : si pip affiche que des scripts (dont `kbmod-*`) sont install?s dans `~/.local/bin` qui n'est pas dans PATH, ajoutez ce r?pertoire ? votre PATH. Pour la session en cours :
+### 6) (Optionnel) Ajouter ~/.local/bin au PATH
+
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-```
-Pour que ce soit permanent, ajoutez cette ligne ? la fin de `~/.bashrc` (ou `~/.profile`) :
-```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-```
-Puis rechargez : `source ~/.bashrc`. *Pour lancer le script KBMOD depuis NPOAP (Windows), ce n'est pas obligatoire : NPOAP appelle `wsl python3 .../kbmod_wsl_detect.py`, qui trouve le module `kbmod` sans les scripts en ligne de commande.*
-
-Si la compilation ?choue (ex. CUDA non trouv?), v?rifiez que `nvcc` est dans le `PATH` ou installez les paquets CUDA indiqu?s par les messages d?erreur.
-
-### 6. D?pendances Python utiles pour le script
-
-Le script `kbmod_wsl_detect.py` utilise aussi `astropy` et `numpy` (souvent d?j? install?s avec KBMOD). Si besoin :
-
-```bash
-pip3 install --user astropy numpy
+source ~/.bashrc
 ```
 
-### 7. V?rifier l?installation
-
-Dans WSL :
+### 7) Verification
 
 ```bash
 python3 -c "import kbmod.search; from kbmod.core.psf import PSF; print('KBMOD OK')"
 ```
 
-Si aucun message d?erreur n?appara?t, KBMOD est utilisable sous WSL.
+## Utilisation depuis NPOAP
 
-## Utilisation depuis NPOAP (Windows)
+Dans l'onglet Asteroides:
 
-1. Dans l?onglet **Ast?ro?des**, chargez un dossier d?images FITS.
-2. Cliquez sur **? D?tection KBMOD (via WSL) ?**.
-3. Ajustez les param?tres (vitesses min/max, ?chelle, max candidats) et lancez la d?tection.
-4. NPOAP appelle `wsl python3 <chemin_wsl>/scripts/kbmod_wsl_detect.py <dossier_fits_wsl> --vmin ... --vmax ... --scale ... --max-results ...`.
-5. Le script ?crit `kbmod_candidates.csv` dans le dossier FITS (accessible en Windows comme en WSL).
-6. NPOAP lit ce CSV et affiche les candidats ; vous pouvez en choisir un comme **T1**.
+1. Chargez un dossier FITS
+2. Cliquez "Detection KBMOD (via WSL)"
+3. Lancez la detection
+4. NPOAP execute `wsl python3 .../scripts/kbmod_wsl_detect.py ...`
+5. Le script genere `kbmod_candidates.csv`
 
-## Ex?cution manuelle du script (dans WSL)
+## Depannage rapide
 
-Pour tester ou lancer la d?tection ? la main dans WSL :
+- Erreur CMake / **`can't copy ... search.cpython-310-...so`** alors que la compilation mentionne **`cpython-312`** : CMake a pris **`/usr/bin/python3`** au lieu du Python conda. Réinstallez avec le script **`install_kbmod_wsl.sh`** à jour (il exporte **`CMAKE_ARGS`** et **`Python3_EXECUTABLE`** vers le même interprète que pip), ou sous WSL :  
+  `CMAKE_ARGS="-DPython3_EXECUTABLE=$(which python3) -DPYTHON_EXECUTABLE=$(which python3)" pip install -e ~/kbmod` depuis **`conda activate astroenv`**.
+- `No module named 'kbmod'`: KBMOD n'est pas installe dans le `python3` utilise par WSL
+- Erreurs **numba** au chargement (`coverage.types`, `Tracer`, etc.) : Numba **0.62+** attend **`coverage>=7.6.1`** (voir [numba#10239](https://github.com/numba/numba/issues/10239)). Ni trop vieux ni une installation incomplete ne convient. Sous WSL : `python3 -m pip install --break-system-packages --user "coverage>=7.6.1"` (Python systeme PEP 668) ou dans conda : `pip install "coverage>=7.6.1"`. Le script `install_kbmod_wsl.sh` applique cette contrainte apres KBMOD.
+- `No FITS files in directory`: verifier le chemin WSL (`/mnt/c/...`)
+- Erreurs pybind11/CMake: relancer `git submodule update --init --recursive`
+- Python 3.13: preferer Python 3.10/3.11
 
-```bash
-# Exemple : dossier FITS mont? sous WSL en /mnt/c/Users/.../mes_fits
-python3 /mnt/c/Users/VOTRE_USER/Documents/NPOAP/scripts/kbmod_wsl_detect.py \
-  /mnt/c/Users/VOTRE_USER/mes_fits \
-  --vmin 0.1 --vmax 10.0 --scale 1.0 --max-results 200
-```
-
-Le fichier `kbmod_candidates.csv` sera cr?? dans le dossier FITS indiqu?.
-
-## D?pannage
-
-- **? KBMOD not installed in this environment ?** / **No module named 'kbmod'** : le script est lanc? sous WSL avec un `python3` qui n'a pas KBMOD. Soit r?installez KBMOD pour ce Python (m?me env que `which python3` dans WSL), soit indiquez ? NPOAP le Python WSL qui a KBMOD : dans `config.py`, posez `KBMOD_WSL_PYTHON` sur le chemin complet dans WSL, par ex. `"/home/docke/miniconda3/bin/python3"` ou `"/home/docke/miniconda3/envs/kbmod/bin/python3"`. Puis relancez la d?tection.
-- **? No FITS files in directory ?** : le chemin WSL du dossier FITS est incorrect. Depuis Windows, `C:\Users\...\mes_fits` devient `/mnt/c/Users/.../mes_fits` sous WSL.
-- **Erreurs CUDA / GPU** : vous pouvez continuer sans GPU (calcul sur CPU, plus lent). V?rifiez les pilotes NVIDIA et le guide CUDA on WSL si vous souhaitez activer le GPU.
-- **`lib/pybind11 does not contain a CMakeLists.txt` / `Unknown CMake command pybind11_add_module`** : les sous-modules Git (pybind11) n'ont pas ?t? r?cup?r?s. Dans le dossier `kbmod`, ex?cutez `git submodule update --init --recursive` puis relancez `pip3 install -e .`.
-- **?chec de build avec Python 3.13** : KBMOD peut ne pas supporter Python 3.13. Utilisez Python 3.10 ou 3.11 (ex. `conda create -n kbmod python=3.10` puis `conda activate kbmod` avant d'installer).
-- **? Scripts installed in '~/.local/bin' which is not on PATH ?** : ajoutez `~/.local/bin` ? votre PATH (voir la note apr?s l'?tape 5 ci-dessus). Optionnel pour NPOAP ; n?cessaire seulement si vous voulez lancer les commandes `kbmod-*` en ligne de commande dans WSL.
-- **`AttributeError: module 'kbmod.search' has no attribute 'ImageStack'`** : le module kbmod est install� mais les bindings C++ (ImageStack, StackSearch) n'ont pas �t� compil�s. R�installez depuis les sources : `cd ~/kbmod`, `git submodule update --init --recursive`, `pip install -e .`. Utilisez Python 3.10 ou 3.11 si besoin.
-
-Voir aussi : `docs/INTEGRATION_KBMOD_NPOAP.md`, `docs/SYNTHETIC_TRACKING_ASTEROIDES.md`.

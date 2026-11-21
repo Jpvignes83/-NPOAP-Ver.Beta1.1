@@ -282,7 +282,7 @@ class GaiaCatalogOverlay:
                                         px, py = wcs.world_to_pixel(row['coord'])
                                         if 0 <= px < w and 0 <= py < h:
                                             valid_rows.append(row)
-                                    except:
+                                    except Exception:
                                         continue
                                 df_region = pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame()
                             except Exception as e:
@@ -342,7 +342,7 @@ class GaiaCatalogOverlay:
                                         px, py = wcs.world_to_pixel(row['coord'])
                                         if 0 <= px < w and 0 <= py < h:
                                             valid_rows.append(row)
-                                    except:
+                                    except Exception:
                                         continue
                                 df_region = pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame()
                             except Exception as e:

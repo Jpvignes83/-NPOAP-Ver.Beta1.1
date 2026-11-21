@@ -1,4 +1,10 @@
 import config
+from core.alcdef_export import relative_flux_to_differential_magnitude
+from core.photometry_apertures import (
+    BATCH_MAX_INPUT_FWHM_PIX,
+    aperture_radii_from_fwhm_pixels,
+    stabilize_fwhm_sequential,
+)
 import logging
 import tkinter as tk
 from tkinter import ttk, Toplevel, messagebox
@@ -71,13 +77,20 @@ def airmass(ra, dec, obstime):
 
 def compute_zero_point(matched_table, airmass):
     try:
+        from config import get_extinction_k, refresh_onsky_from_config_json
+
+        refresh_onsky_from_config_json()
+        k = get_extinction_k()
+        if k is None:
+            k = 0.1
         zp_vals = matched_table['phot_g_mean_mag'] - matched_table['instrumental_mag']
         zp_clipped = sigma_clip(zp_vals, sigma=3, cenfunc='median')
         zp_median = np.median(zp_clipped)
-        zp_corrected = zp_median + 0.1 * airmass
+        zp_corrected = zp_median + float(k) * airmass
         zp_std = np.std(zp_clipped)
         return zp_corrected, zp_std
-    except: return None, None
+    except Exception:
+        return None, None
 
 def match_sources_with_gaia(phot_df, search_radius_arcsec=2.0, gaia_mag_column="phot_g_mean_mag"):
     if not {"ra", "dec"}.issubset(phot_df.columns): return phot_df
@@ -237,8 +250,12 @@ def show_diagnostics_windows(data, x_t1, y_t1, fwhm_info, radii=None, parent=Non
     created_windows = []
     fwhm_val, row_data, col_data = fwhm_info
     if not (fwhm_val and row_data and col_data): return []
-    if radii: r_ap, r_in, r_out = radii
-    else: r_ap, r_in, r_out = 1.4*fwhm_val, 2.6*fwhm_val, 3.4*fwhm_val 
+    if radii:
+        r_ap, r_in, r_out = radii
+    else:
+        r_ap, r_in, r_out = aperture_radii_from_fwhm_pixels(
+            fwhm_val, default_fwhm=4.0, max_input_fwhm=30.0
+        ) 
 
     gauss = lambda x, a, x0, s, off: a * np.exp(-(x-x0)**2/(2*s**2)) + off
     def draw_limits(ax, center, fw, rap, rin, rout):
@@ -452,56 +469,118 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
     canvas_mpl.mpl_connect('motion_notify_event', update_cursor)
 
     stars_data = []
-    
+
+    def _format_aperture_field(val):
+        if val is None or (isinstance(val, float) and not np.isfinite(val)):
+            return "8.0"
+        x = float(val)
+        s = f"{x:.3f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+
+    def _parse_aperture_field(svar):
+        try:
+            return float(str(svar.get()).strip().replace(",", "."))
+        except (TypeError, ValueError):
+            return None
+
     def update_aperture_visibility(aperture_data):
         state = aperture_data['active'].get()
         for p in aperture_data['patches']:
             p.set_visible(state)
-        canvas_mpl.draw_idle() 
-        
+        canvas_mpl.draw_idle()
+
     def add_ui(label, x, y, ra, ri, ro, color, coord):
-        c_ap = Circle((x,y), ra, ec=color, ls='-', fill=False)
-        c_in = Circle((x,y), ri, ec=color, ls=':', fill=False)
-        c_out = Circle((x,y), ro, ec=color, ls=':', fill=False)
-        t_label = ax.text(x, y+15, label, color=color, fontweight='bold', ha='center')
-        ax.add_patch(c_ap); ax.add_patch(c_in); ax.add_patch(c_out)
-        
+        c_ap = Circle((x, y), ra, ec=color, ls="-", fill=False)
+        c_in = Circle((x, y), ri, ec=color, ls=":", fill=False)
+        c_out = Circle((x, y), ro, ec=color, ls=":", fill=False)
+        t_label = ax.text(x, y + 15, label, color=color, fontweight="bold", ha="center")
+        ax.add_patch(c_ap)
+        ax.add_patch(c_in)
+        ax.add_patch(c_out)
+
         row = tk.Frame(frame_inner, bg="#f0f0f0")
         row.pack(fill="x", pady=1)
-        act = tk.BooleanVar(value=True) 
-        vap, vin, vout = tk.DoubleVar(value=ra), tk.DoubleVar(value=ri), tk.DoubleVar(value=ro)
-        
+        act = tk.BooleanVar(value=True)
+        # StringVar : permet de saisir librement (DoubleVar + trace bloque souvent la frappe)
+        vap = tk.StringVar(value=_format_aperture_field(ra))
+        vin = tk.StringVar(value=_format_aperture_field(ri))
+        vout = tk.StringVar(value=_format_aperture_field(ro))
+
         star_entry = {
-            "label": label, "coord": coord, "x": x, "y": y, 
-            "vars": (vap, vin, vout), "active": act, "patches": (c_ap, c_in, c_out, t_label)
+            "label": label,
+            "coord": coord,
+            "x": x,
+            "y": y,
+            "vars": (vap, vin, vout),
+            "active": act,
+            "patches": (c_ap, c_in, c_out, t_label),
         }
         tk.Checkbutton(row, variable=act, bg="#f0f0f0").pack(side="left", padx=1)
         act.trace_add("write", lambda *a: update_aperture_visibility(star_entry))
-        lbl = tk.Label(row, text=label, fg=color, font=("Consolas",9,"bold"), width=5, bg="#f0f0f0", cursor="hand2")
+        lbl = tk.Label(
+            row,
+            text=label,
+            fg=color,
+            font=("Consolas", 9, "bold"),
+            width=5,
+            bg="#f0f0f0",
+            cursor="hand2",
+        )
         lbl.pack(side="left")
         tk.Label(row, text=f"{coord.ra.deg:.5f}", width=9, bg="#eef").pack(side="left", padx=1)
         tk.Label(row, text=f"{coord.dec.deg:.5f}", width=9, bg="#eef").pack(side="left", padx=1)
-        
-        def upd(*a): 
-            try: c_ap.set_radius(vap.get()); c_in.set_radius(vin.get()); c_out.set_radius(vout.get()); canvas_mpl.draw_idle()
-            except: pass
-            
-        for v in (vap, vin, vout): 
-            v.trace_add("write", upd)
-            tk.Entry(row, textvariable=v, width=4).pack(side="left", padx=1)
+
+        def refresh_circles(*_):
+            try:
+                a = _parse_aperture_field(vap)
+                b = _parse_aperture_field(vin)
+                c = _parse_aperture_field(vout)
+                if a is None or b is None or c is None:
+                    return
+                if not (a > 0 and b > a and c > b):
+                    return
+                c_ap.set_radius(a)
+                c_in.set_radius(b)
+                c_out.set_radius(c)
+                canvas_mpl.draw_idle()
+            except Exception:
+                pass
+
+        def on_entry_commit(event=None):
+            refresh_circles()
+
+        for sv in (vap, vin, vout):
+            ent = tk.Entry(row, textvariable=sv, width=7, justify="right", takefocus=True)
+            ent.pack(side="left", padx=1)
+            ent.bind("<FocusOut>", on_entry_commit)
+            ent.bind("<Return>", on_entry_commit)
+
         stars_data.append(star_entry)
-        lbl.bind("<Button-1>", lambda e: (ax.set_xlim(x-100, x+100), ax.set_ylim(y-100, y+100), canvas_mpl.draw_idle()))
-        
-        # Clic droit pour afficher les diagnostics FWHM/PSF (uniquement pour T1)
-        if label == 'T1':
+        lbl.bind(
+            "<Button-1>",
+            lambda e: (
+                ax.set_xlim(x - 100, x + 100),
+                ax.set_ylim(y - 100, y + 100),
+                canvas_mpl.draw_idle(),
+            ),
+        )
+
+        if label == "T1":
+
             def on_right_click(e):
                 fwhm_info = estimate_fwhm_marginal(data, x, y)
                 if fwhm_info and fwhm_info[0] is not None:
-                    # R?cup?rer les apertures actuelles
-                    r_ap_curr = vap.get()
-                    r_in_curr = vin.get()
-                    r_out_curr = vout.get()
-                    show_diagnostics_windows(data, x, y, fwhm_info, radii=(r_ap_curr, r_in_curr, r_out_curr))
+                    r_ap_curr = _parse_aperture_field(vap)
+                    r_in_curr = _parse_aperture_field(vin)
+                    r_out_curr = _parse_aperture_field(vout)
+                    if r_ap_curr is None or r_in_curr is None or r_out_curr is None:
+                        r_ap_curr = float(ra)
+                        r_in_curr = float(ri)
+                        r_out_curr = float(ro)
+                    show_diagnostics_windows(
+                        data, x, y, fwhm_info, radii=(r_ap_curr, r_in_curr, r_out_curr)
+                    )
+
             lbl.bind("<Button-3>", on_right_click)
 
     def process_coord(wx, wy, label, fwhm_override=None):
@@ -526,20 +605,12 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
             else:
                 fwhm = 4.0  # Valeur par d?faut
         
-        # Calcul des apertures bas?es sur le FWHM
-        r_ap = max(2.0, min(round(2.0*fwhm, 1), 50.0))  # Ouverture = FWHM × 2
-        r_in = max(4.0, min(round(2.6*fwhm, 1), 60.0))  # Coefficient 2.6
-        r_out = max(6.0, min(round(3.4*fwhm, 1), 70.0))  # Coefficient 3.4
-        
-        logger.info(f"[{label}] FWHM={fwhm:.2f} px ? Apertures: r_ap={r_ap:.1f}, r_in={r_in:.1f}, r_out={r_out:.1f}")
-        
-        # V?rification de coh?rence : r_in > r_ap et r_out > r_in
-        if r_in <= r_ap:
-            r_in = r_ap + 2.0
-            logger.warning(f"[{label}] Ajustement r_in: {r_in:.1f} (r_in <= r_ap)")
-        if r_out <= r_in:
-            r_out = r_in + 2.0
-            logger.warning(f"[{label}] Ajustement r_out: {r_out:.1f} (r_out <= r_in)")
+        r_ap, r_in, r_out = aperture_radii_from_fwhm_pixels(
+            fwhm, default_fwhm=4.0, max_input_fwhm=30.0
+        )
+        logger.info(
+            f"[{label}] FWHM={fwhm:.2f} px → Apertures: r_ap={r_ap:.1f}, r_in={r_in:.1f}, r_out={r_out:.1f}"
+        )
         
         col = "red" if label == "T1" else ("orange" if variable_flags.get(label) else "cyan")
         real_coord = wcs.pixel_to_world(x, y)
@@ -558,16 +629,37 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
     canvas_mpl.mpl_connect("button_press_event", on_click)
 
     def validate():
-        if not any(s['label'] == 'T1' for s in stars_data): return messagebox.showwarning("Erreur", "Pas de T1")
-        sels = []    
-        for s in stars_data:    
-            if s['active'].get(): 
-                sels.append({
-                    "label": s['label'], "coord": s['coord'], 
-                    "r_ap": s['vars'][0].get(), "r_in": s['vars'][1].get(), "r_out": s['vars'][2].get()
-                })    
-        root.destroy()    
-        if on_finish: on_finish(sels)
+        if not any(s["label"] == "T1" for s in stars_data):
+            return messagebox.showwarning("Erreur", "Pas de T1")
+        sels = []
+        for s in stars_data:
+            if not s["active"].get():
+                continue
+            ra = _parse_aperture_field(s["vars"][0])
+            ri = _parse_aperture_field(s["vars"][1])
+            ro = _parse_aperture_field(s["vars"][2])
+            if ra is None or ri is None or ro is None:
+                return messagebox.showwarning(
+                    "Rayons invalides",
+                    f"{s['label']} : saisissez des nombres valides pour Ap / In / Out.",
+                )
+            if not (ra > 0 and ri > ra and ro > ri):
+                return messagebox.showwarning(
+                    "Rayons incohérents",
+                    f"{s['label']} : il faut Ap > 0, In > Ap, Out > In (en pixels).",
+                )
+            sels.append(
+                {
+                    "label": s["label"],
+                    "coord": s["coord"],
+                    "r_ap": ra,
+                    "r_in": ri,
+                    "r_out": ro,
+                }
+            )
+        root.destroy()
+        if on_finish:
+            on_finish(sels)
 
     tk.Button(frame_bot, text="VALIDER & ANALYSER", bg="#ccffcc", font=("Arial",11,"bold"), command=validate).pack(side="left", padx=5, pady=5)
     
@@ -588,10 +680,25 @@ def launch_photometry_aperture(fits_path, target_data, comp_coords_data, variabl
 # 3. PIPELINE BATCH
 # -------------------------------------------------------------------
 
-def process_photometry_series(folder, target_coord, comps, ref_image, selections=None, min_snr=5.0, variable_flags=None, progress_callback=None, ephemeris_data=None, astrometry_positions=None, manual_t1_anchors=None, manual_aperture_overrides=None, manual_aperture_callback=None):
+def process_photometry_series(
+    folder,
+    target_coord,
+    comps,
+    ref_image,
+    selections=None,
+    min_snr=5.0,
+    variable_flags=None,
+    progress_callback=None,
+    ephemeris_data=None,
+    astrometry_positions=None,
+    manual_t1_anchors=None,
+    manual_aperture_overrides=None,
+    manual_aperture_callback=None,
+    transformation_coeff=None,
+):
     """
     Ex?cute la photom?trie en s?rie.
-    
+
     Parameters
     ----------
     ephemeris_data : Table, optional
@@ -600,9 +707,27 @@ def process_photometry_series(folder, target_coord, comps, ref_image, selections
     astrometry_positions : dict, optional
         Dictionnaire {nom_fichier: {'ra_deg': float, 'dec_deg': float, 'jd_utc': float}}.
         Si fourni, les positions astrom?triques mesur?es (ADES) seront utilis?es en priorit? pour suivre T1.
+    transformation_coeff : dict, optional
+        Si fourni : ``{"slope": a, "intercept": b, "mag_std": optional, "ref_band_id": optional}`` (réduction NPOAP).
+        Pour chaque image avec flux T1 > 0 : ``mag_ref = a * m_inst + b`` avec ``m_inst = -2.5 log10(flux)``.
     """
-    
     folder = Path(folder)
+    _trans = transformation_coeff
+    if _trans is not None:
+        try:
+            if not (
+                isinstance(_trans, dict)
+                and np.isfinite(float(_trans["slope"]))
+                and np.isfinite(float(_trans["intercept"]))
+            ):
+                _trans = None
+        except (KeyError, TypeError, ValueError):
+            _trans = None
+    if _trans is not None:
+        logger.info(
+            "Batch photométrie : coefficients transformation actifs (ref_band_id=%s).",
+            _trans.get("ref_band_id") or "—",
+        )
     manual_aperture_overrides = manual_aperture_overrides or {}
     fits_files = sorted(folder.glob("*.fits"))
     total = len(fits_files)
@@ -870,10 +995,40 @@ def process_photometry_series(folder, target_coord, comps, ref_image, selections
                 comps_total_this_image = 0
                 comps_valid_this_image = 0
                 fwhm_list = []
-                
-                # Estimer le FWHM sur T1 pour cette image (avant de traiter les ?toiles)
-                # Ce FWHM sera utilis? pour calculer les apertures dynamiquement
-                image_fwhm = None
+
+                # FWHM PSF sur les comparateurs (médiane) — plus représentatif du voile que T1 seul
+                comp_fwhm_estimates = []
+                for sd in stars_to_process:
+                    lab = sd.get("label", "")
+                    if not (isinstance(lab, str) and lab.startswith("C")):
+                        continue
+                    try:
+                        c = sd["coord"]
+                        pxc, pyc = wcs.world_to_pixel(c)
+                        ny, nx = data.shape
+                        if not (0 <= pxc < nx and 0 <= pyc < ny):
+                            continue
+                        pxc, pyc = refine_centroid(data, float(pxc), float(pyc), box_size=25)
+                        if not (0 <= pxc < nx and 0 <= pyc < ny):
+                            continue
+                        fr = estimate_fwhm_marginal(data, pxc, pyc)
+                        if fr and fr[0] is not None and np.isfinite(fr[0]) and fr[0] > 0:
+                            comp_fwhm_estimates.append(float(fr[0]))
+                    except Exception:
+                        pass
+                fwhm_from_comps = None
+                if len(comp_fwhm_estimates) >= 2:
+                    fwhm_from_comps = float(np.median(comp_fwhm_estimates))
+                    logger.debug(
+                        "[BATCH] FWHM médiane %d comparateurs : %.2f px",
+                        len(comp_fwhm_estimates),
+                        fwhm_from_comps,
+                    )
+                elif len(comp_fwhm_estimates) == 1:
+                    fwhm_from_comps = comp_fwhm_estimates[0]
+
+                # Estimer le FWHM sur T1 pour cette image (secours si comps insuffisants)
+                fwhm_t1_meas = None
                 t1_px_refined = None
                 t1_pred_px = None
                 t1_pred_py = None
@@ -932,22 +1087,58 @@ def process_photometry_series(folder, target_coord, comps, ref_image, selections
                         px_t1, py_t1 = wcs.world_to_pixel(t1_coord)
                         ny, nx = data.shape
                         if 0 <= px_t1 < nx and 0 <= py_t1 < ny:
-                            t1_pred_px, t1_pred_py = px_t1, py_t1
-                            px_t1, py_t1 = refine_centroid(data, px_t1, py_t1, box_size=45)
-                            if np.isfinite(px_t1) and np.isfinite(py_t1) and 0 <= px_t1 < nx and 0 <= py_t1 < ny:
-                                if np.isfinite(px_t1) and np.isfinite(py_t1) and 0 <= px_t1 < nx and 0 <= py_t1 < ny:
-                                    t1_px_refined = (px_t1, py_t1)
-                                elif t1_pred_px is not None and t1_pred_py is not None:
+                            t1_pred_px, t1_pred_py = float(px_t1), float(py_t1)
+                            _fits_name = Path(fpath).name
+                            # Positions archive (*_observations.json / ADES) : suivre exactement RA/Dec -> pixel
+                            # pour cette trame. refine_centroid peut accrocher une étoile voisine et dégrader
+                            # fortement le flux (voir batch T1 invalid / net_flux négatif).
+                            t1_from_astrometry_archive = (
+                                astrometry_positions is not None
+                                and _fits_name in astrometry_positions
+                            )
+                            if t1_from_astrometry_archive:
+                                t1_px_refined = (t1_pred_px, t1_pred_py)
+                                logger.debug(
+                                    "[BATCH] T1 depuis archive astrométrique (sans recentrage centroïde): "
+                                    "%s px=[%.2f, %.2f]",
+                                    _fits_name,
+                                    t1_pred_px,
+                                    t1_pred_py,
+                                )
+                            else:
+                                px_t1, py_t1 = refine_centroid(
+                                    data, px_t1, py_t1, box_size=45
+                                )
+                                if (
+                                    np.isfinite(px_t1)
+                                    and np.isfinite(py_t1)
+                                    and 0 <= px_t1 < nx
+                                    and 0 <= py_t1 < ny
+                                ):
+                                    t1_px_refined = (float(px_t1), float(py_t1))
+                                else:
                                     t1_px_refined = (t1_pred_px, t1_pred_py)
-                                fwhm_x, fwhm_y = t1_px_refined if t1_px_refined else (px_t1, py_t1)
-                                fwhm_result = estimate_fwhm_marginal(data, fwhm_x, fwhm_y)
-                                if fwhm_result and fwhm_result[0] and np.isfinite(fwhm_result[0]):
-                                    image_fwhm = fwhm_result[0]
+                            fwhm_x, fwhm_y = t1_px_refined
+                            fwhm_result = estimate_fwhm_marginal(data, fwhm_x, fwhm_y)
+                            if fwhm_result and fwhm_result[0] and np.isfinite(fwhm_result[0]):
+                                fwhm_t1_meas = fwhm_result[0]
                     except Exception:
                         pass
-                
+
                 filename = Path(fpath).name
                 manual_ap = None
+                r_ap_default = r_in_default = r_out_default = 8.0
+
+                image_fwhm_raw = None
+                if fwhm_from_comps is not None:
+                    image_fwhm_raw = fwhm_from_comps
+                elif fwhm_t1_meas is not None and fwhm_t1_meas > 0:
+                    image_fwhm_raw = fwhm_t1_meas
+
+                image_fwhm = None
+                if image_fwhm_raw is not None and np.isfinite(image_fwhm_raw) and image_fwhm_raw > 0:
+                    image_fwhm = float(np.clip(image_fwhm_raw, 2.0, BATCH_MAX_INPUT_FWHM_PIX))
+
                 # Si FWHM non estimé, permettre un réglage manuel par image (cas comètes)
                 if image_fwhm is None or image_fwhm <= 0:
                     manual_ap = manual_aperture_overrides.get(filename)
@@ -971,7 +1162,8 @@ def process_photometry_series(folder, target_coord, comps, ref_image, selections
                                     'r_in': r_in_default,
                                     'r_out': r_out_default
                                 }
-                                image_fwhm = r_ap_default / 1.4
+                                # Cohérent avec r_ap ≈ 2 × FWHM (SET-UP / photometry_apertures)
+                                image_fwhm = r_ap_default / 2.0
                                 logger.info(
                                     f"[BATCH] {filename}: FWHM indisponible -> apertures manuelles "
                                     f"r_ap={r_ap_default:.1f}, r_in={r_in_default:.1f}, r_out={r_out_default:.1f}"
@@ -983,31 +1175,28 @@ def process_photometry_series(folder, target_coord, comps, ref_image, selections
                     if manual_ap is None:
                         image_fwhm = 4.0  # fallback
 
-                # Stabiliser le FWHM (rejeter les sauts brutaux) uniquement en mode auto
+                # Lissage léger d'image en image (évite sauts tout en ne figeant pas le PSF)
                 if manual_ap is None:
-                    if last_fwhm_valid is not None and image_fwhm is not None:
-                        if image_fwhm > last_fwhm_valid * 1.8 or image_fwhm < last_fwhm_valid * 0.6:
-                            logger.warning(
-                                f"[BATCH] FWHM instable {image_fwhm:.2f}px -> "
-                                f"{last_fwhm_valid:.2f}px (valeur precedente)"
-                            )
-                            image_fwhm = last_fwhm_valid
-                        else:
-                            last_fwhm_valid = image_fwhm
-                    else:
-                        if image_fwhm is not None and image_fwhm > 0:
-                            last_fwhm_valid = image_fwhm
-                
-                # Calcul des apertures basées sur le FWHM (auto) ou réglage manuel
+                    image_fwhm = stabilize_fwhm_sequential(image_fwhm, last_fwhm_valid)
+                    if image_fwhm is not None and image_fwhm > 0:
+                        last_fwhm_valid = image_fwhm
+
+                # Calcul des apertures (même règle que SET-UP onglet astéroïdes)
                 if manual_ap is None:
-                    r_ap_default = 1.4 * image_fwhm
-                    r_in_default = 2.6 * image_fwhm
-                    r_out_default = 3.4 * image_fwhm
+                    r_ap_default, r_in_default, r_out_default = aperture_radii_from_fwhm_pixels(
+                        image_fwhm, default_fwhm=4.0, max_input_fwhm=BATCH_MAX_INPUT_FWHM_PIX
+                    )
                     aperture_mode = "fwhm_auto"
                 else:
                     aperture_mode = "manual"
+
+                fwhm_note = ""
+                if fwhm_from_comps is not None:
+                    fwhm_note = " (PSF comps)"
+                elif fwhm_t1_meas is not None:
+                    fwhm_note = " (PSF T1)"
                 logger.info(
-                    f"[BATCH] Image {filename}: mode={aperture_mode}, FWHM={image_fwhm:.2f} px -> "
+                    f"[BATCH] Image {filename}: mode={aperture_mode}, FWHM={image_fwhm:.2f} px{fwhm_note} -> "
                     f"Apertures: r_ap={r_ap_default:.1f}, r_in={r_in_default:.1f}, r_out={r_out_default:.1f}"
                 )
                 row["r_ap_used"] = float(r_ap_default)
@@ -1213,6 +1402,32 @@ def process_photometry_series(folder, target_coord, comps, ref_image, selections
                 row["rel_flux_T1"] = rel_flux
                 row["rel_flux_err_T1"] = err_final
 
+                if _trans is not None:
+                    rid = str(_trans.get("ref_band_id") or "")
+                    if np.isfinite(flux_t1_net) and flux_t1_net > 0:
+                        a = float(_trans["slope"])
+                        b = float(_trans["intercept"])
+                        m_inst = float(-2.5 * np.log10(flux_t1_net))
+                        row["m_inst_T1"] = round(m_inst, 6)
+                        row["mag_T1_ref"] = round(float(a * m_inst + b), 6)
+                        row["delta_to_ref"] = round(float((a - 1.0) * m_inst + b), 6)
+                        t1_mag_err = float(1.0857 * (np.sqrt(err_t1_sq) / flux_t1_net))
+                        inst_term = float(abs(a) * t1_mag_err)
+                        ms = _trans.get("mag_std")
+                        if ms is not None and np.isfinite(float(ms)) and float(ms) >= 0.0:
+                            row["rms_mag_T1_ref"] = round(
+                                float(np.sqrt(max(inst_term**2 + float(ms) ** 2, 0.0))), 6
+                            )
+                        else:
+                            row["rms_mag_T1_ref"] = round(inst_term, 6)
+                        row["trans_ref_band_id"] = rid
+                    else:
+                        row["m_inst_T1"] = np.nan
+                        row["mag_T1_ref"] = np.nan
+                        row["rms_mag_T1_ref"] = np.nan
+                        row["delta_to_ref"] = np.nan
+                        row["trans_ref_band_id"] = rid
+
                 results.append(row)
 
                 if comps_total_this_image > 0:
@@ -1264,12 +1479,37 @@ def process_photometry_series(folder, target_coord, comps, ref_image, selections
             df["rel_flux_err_T1"] = 0
             df["rel_flux_T1_fn_residual"] = 0
 
-        # Ordre des colonnes pr?f?rentiel
+        _mag, _mag_e = relative_flux_to_differential_magnitude(
+            df["rel_flux_T1_fn"].to_numpy(dtype=float),
+            df["rel_flux_err_T1"].to_numpy(dtype=float),
+            normalize_median=False,
+        )
+        df["mag_T1_fn"] = np.round(_mag, 3)
+        df["mag_err_T1_fn"] = np.round(_mag_e, 3)
+        for _c in ("mag_T1_ref", "rms_mag_T1_ref", "delta_to_ref"):
+            if _c in df.columns:
+                df[_c] = df[_c].round(3)
+
+        # Ordre des colonnes pr?f?rentiel (mesures principales en mag, 3 dec.)
         cols_priority = [
-            'slice', 'JD-UTC', 'AIRMASS', 'FWHM_Mean',
-            'rel_flux_T1_fn', 'rel_flux_T1_fn_residual',
-            'rel_flux_T1', 'rel_flux_err_T1'
+            "slice",
+            "JD-UTC",
+            "AIRMASS",
+            "FWHM_Mean",
+            "mag_T1_fn",
+            "mag_err_T1_fn",
+            "mag_T1_ref",
+            "rms_mag_T1_ref",
+            "delta_to_ref",
+            "m_inst_T1",
+            "trans_ref_band_id",
+            "rel_flux_T1_fn",
+            "rel_flux_T1_fn_residual",
+            "rel_flux_T1",
+            "rel_flux_err_T1",
         ]
+        # Ne garder en tête que les colonnes transformation présentes
+        cols_priority = [c for c in cols_priority if c in df.columns]
         df = df[cols_priority + [c for c in df.columns if c not in cols_priority]]
 
         # Export final
@@ -1298,9 +1538,19 @@ class PhotometryPipeline:
     def match_sources_with_gaia(df, sr=2.0, col="phot_g_mean_mag"): return match_sources_with_gaia(df, sr, col)
     def launch_photometry_aperture(self, fits_path, target_coord, comp_coords, variable_flags=None, on_finish=None):
         return launch_photometry_aperture(fits_path, target_coord, comp_coords, variable_flags, on_finish)
-    def process_photometry_series(self, folder, target_coord, comps, 
-                                  ref_image, selections=None, 
-                                  min_snr=5.0, variable_flags=None, progress_callback=None, ephemeris_data=None):
+    def process_photometry_series(
+        self,
+        folder,
+        target_coord,
+        comps,
+        ref_image,
+        selections=None,
+        min_snr=5.0,
+        variable_flags=None,
+        progress_callback=None,
+        ephemeris_data=None,
+        transformation_coeff=None,
+    ):
         return process_photometry_series(
             folder=folder,
             target_coord=target_coord,
@@ -1310,5 +1560,6 @@ class PhotometryPipeline:
             min_snr=min_snr,
             variable_flags=variable_flags,
             progress_callback=progress_callback,
-            ephemeris_data=ephemeris_data
+            ephemeris_data=ephemeris_data,
+            transformation_coeff=transformation_coeff,
         )

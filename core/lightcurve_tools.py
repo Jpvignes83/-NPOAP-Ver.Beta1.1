@@ -219,6 +219,21 @@ def _process_one_lc_file(filepath: str, all_data: list) -> None:
         print(f"Erreur CRITIQUE lors du traitement de {filename}: {e}. Fichier ignoré.")
 
 
+def read_lightcurve_file(filepath: str):
+    """
+    Lit un unique fichier LC (.txt/.csv) et renvoie (time, flux) normalisés.
+    Réutilise exactement la même logique que la concaténation.
+    """
+    all_data = []
+    _process_one_lc_file(str(filepath), all_data)
+    if not all_data:
+        raise ValueError(f"Fichier LC non lisible ou non reconnu: {filepath}")
+    df = all_data[0]
+    if "Time" not in df.columns or "Flux" not in df.columns:
+        raise ValueError(f"Colonnes Time/Flux introuvables: {filepath}")
+    return df["Time"].values, df["Flux"].values
+
+
 def concatenate_lightcurve_paths(file_paths, output_directory=None):
     """
     Concatène une liste explicite de fichiers .txt / .csv (mêmes formats que ``concatenate_lightcurves``).

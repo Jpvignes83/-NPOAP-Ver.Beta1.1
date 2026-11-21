@@ -1,4 +1,4 @@
-# gui/photometry_exoplanets_tab.py
+﻿# gui/photometry_exoplanets_tab.py
 import json
 import os
 import sys
@@ -6,12 +6,16 @@ import shutil
 import zipfile
 import subprocess
 import importlib.util
+import inspect
 import tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from threading import Thread
 import logging
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import csv
 import pandas as pd
 import numpy as np
 from astropy.io import fits
@@ -47,6 +51,18 @@ def _to_utf8_no_bom(s):
     return s.encode('utf-8', errors='replace')
 
 
+def _pip_stderr_suggests_site_packages_denied(blob: str) -> bool:
+    """WinError 5 / accès refusé au dossier env conda (souvent ProgramData\\Miniconda3)."""
+    b = (blob or "").lower()
+    return (
+        "winerror 5" in b
+        or "accès refusé" in b
+        or "access is denied" in b
+        or ("permission denied" in b and "site-packages" in b)
+        or ("errno 13" in b and "permission" in b)
+    )
+
+
 def _read_csv_robust(file_path):
     """
     Lit un CSV avec plusieurs encodages (évite 'utf-8' codec can't decode byte 0xff).
@@ -61,23 +77,1006 @@ def _read_csv_robust(file_path):
     return df
 
 
-# --- Imports du pipeline ---
+# --- Pipeline photométrie (batch legacy, conservé pour compatibilité interne) ---
 from core.photometry_pipeline import PhotometryPipeline
-from gui.target_selector import launch_target_selection
+from gui.manual_help import (
+    add_manual_help_header,
+    open_exoplanetpie_quickstart,
+    open_user_manual_chapter,
+)
 import config
 
 # --- NOUVEAU : On utilise UNIQUEMENT le visualiseur complet ---
 from gui.lightcurve_fitting import LightcurveFitting
 
+# --- Workflow ExoPlanetPie (panneau droit à côté de HOPS ; backend core/exoplanetpie_pipeline.py) ---
+import matplotlib
+
+matplotlib.use("Agg", force=False)
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+
+from core.exoplanetpie_pipeline import (
+    SUPPORTED_FILTERS,
+    PlanetParams,
+    TransitFitResult,
+    detrend_and_normalize,
+    diagnostics,
+    download_satellite_lightcurve,
+    fetch_planet_from_exoclock,
+    fetch_planet_from_nasa_archive,
+    fit_transit_batman_ultranest,
+    fit_ttv,
+    list_satellite_lightcurves,
+    load_midtimes,
+    load_ttv_result,
+    merge_midtimes,
+    save_midtimes,
+    save_ttv_result,
+    save_transit_segment,
+    slice_transits,
+)
+logger = logging.getLogger(__name__)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Dossiers de travail (équivalent ExoPlanetPie.ini)
+# ────────────────────────────────────────────────────────────────────────────
+def default_work_root() -> Path:
+    base = Path(config.OUTPUT_DIR) / "exoplanetpie"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def work_subdir(name: str) -> Path:
+    p = default_work_root() / name
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Utilitaire : lecture robuste d'un CSV `time, flux, flux_err`
+# ────────────────────────────────────────────────────────────────────────────
+def _read_lightcurve_csv(path: Path) -> Dict[str, np.ndarray]:
+    """Accepte virgule, tab ou espace ; ignore les lignes commentaires (#)."""
+    path = Path(path)
+    raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    rows: List[List[float]] = []
+    for ln in raw:
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        # détection séparateur
+        if "," in s:
+            parts = [p.strip() for p in s.split(",")]
+        elif "\t" in s:
+            parts = [p.strip() for p in s.split("\t")]
+        else:
+            parts = s.split()
+        try:
+            vals = [float(p) for p in parts[:3] if p]
+        except ValueError:
+            # ligne d'en-tête
+            continue
+        if len(vals) >= 2:
+            if len(vals) == 2:
+                vals.append(float("nan"))
+            rows.append(vals[:3])
+    if not rows:
+        raise ValueError(f"Aucune donnée numérique trouvée dans {path}.")
+    arr = np.asarray(rows, dtype=float)
+    return {"time": arr[:, 0], "flux": arr[:, 1], "flux_err": arr[:, 2]}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Onglet principal
+# ────────────────────────────────────────────────────────────────────────────
+class ExoplanetPieWorkflowTab(ttk.Frame):
+    """Panneau droit de « Photométrie Exoplanètes » : workflow ExoPlanetPie natif (à côté de HOPS)."""
+
+    def __init__(self, parent, *, show_manual_help: bool = False):
+        super().__init__(parent, padding=0)
+        self.pack(fill=tk.BOTH, expand=True)
+        if show_manual_help:
+            add_manual_help_header(self, "4-photométrie-exoplanètes")
+
+        # Barre d'aide propre au workflow ExoPlanetPie : raccourci vers le mode
+        # d'emploi rapide (docs/EXOPLANETPIE_MODE_EMPLOI.md) et vers la section
+        # détaillée §4.8 du manuel utilisateur.
+        help_bar = ttk.Frame(self)
+        help_bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 4))
+        ttk.Label(
+            help_bar,
+            text="Workflow ExoPlanetPie natif — batman + ultranest + ExoTETHyS",
+            font=("Arial", 9, "italic"),
+            foreground="gray30",
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            help_bar,
+            text="📖 Mode d'emploi rapide",
+            command=lambda: open_exoplanetpie_quickstart(self.winfo_toplevel()),
+        ).pack(side=tk.RIGHT, padx=(4, 2))
+        ttk.Button(
+            help_bar,
+            text="Manuel §4.8…",
+            command=lambda: open_user_manual_chapter(
+                "48-workflow-exoplanetpie-natif", self.winfo_toplevel()
+            ),
+        ).pack(side=tk.RIGHT, padx=2)
+
+        # État partagé entre sous-onglets
+        self.planet: PlanetParams = PlanetParams()
+        self.raw_lc: Optional[Dict[str, np.ndarray]] = None
+        self.raw_lc_path: Optional[Path] = None
+        self.segments: List[Dict[str, Any]] = []
+        self.segment_paths: List[Path] = []
+        self.fit_results: List[TransitFitResult] = []
+        self.merger_rows: List[Dict[str, Any]] = []
+        self.last_ttv_result = None
+
+        # Diagnostics (batman/ultranest/lightkurve/exotethys)
+        diag = diagnostics()
+        if not all(diag.values()):
+            missing = [k for k, ok in diag.items() if not ok]
+            logger.warning("ExoPlanetPie workflow : dépendances manquantes -> %s", missing)
+
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self.tab_a = ttk.Frame(self.notebook)
+        self.tab_b = ttk.Frame(self.notebook)
+        self.tab_c = ttk.Frame(self.notebook)
+        self.tab_d = ttk.Frame(self.notebook)
+        self.tab_e = ttk.Frame(self.notebook)
+        self.tab_f = ttk.Frame(self.notebook)
+        self.tab_g = ttk.Frame(self.notebook)
+        self.tab_h = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_a, text="A. Satellite Data")
+        self.notebook.add(self.tab_b, text="B. NASA / AAVSO")
+        self.notebook.add(self.tab_c, text="C. Get Planet")
+        self.notebook.add(self.tab_d, text="D. Prepare Data")
+        self.notebook.add(self.tab_e, text="E. Transit Fitter")
+        self.notebook.add(self.tab_f, text="F. Transit Merger")
+        self.notebook.add(self.tab_g, text="G. TTV")
+        self.notebook.add(self.tab_h, text="H. Visualizer")
+
+        self._build_tab_a()
+        self._build_tab_b()
+        self._build_tab_c()
+        self._build_tab_d()
+        self._build_tab_e()
+        self._build_tab_f()
+        self._build_tab_g()
+        self._build_tab_h()
+
+        # Barre de statut globale
+        self.status_var = tk.StringVar(value=self._status_text(diag))
+        ttk.Label(self, textvariable=self.status_var, foreground="gray", anchor="w").pack(
+            fill="x", padx=4, pady=(0, 4)
+        )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Statut / aide
+    # ──────────────────────────────────────────────────────────────────────
+    def _status_text(self, diag: Dict[str, bool]) -> str:
+        parts = [f"{name}: {'✓' if ok else '✗'}" for name, ok in diag.items()]
+        return "Dépendances — " + "   ".join(parts) + f"   |  Workdir : {default_work_root()}"
+
+    def _set_busy(self, text: str) -> None:
+        self.status_var.set(text)
+        self.update_idletasks()
+
+    def _post_threadsafe(self, fn, *args):
+        self.after(0, lambda: fn(*args))
+
+    # ──────────────────────────────────────────────────────────────────────
+    # A. Satellite Data
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_a(self) -> None:
+        frm = self.tab_a
+        head = ttk.LabelFrame(frm, text="1. Rechercher des fichiers TESS / Kepler / K2 (lightkurve → MAST)", padding=8)
+        head.pack(fill="x", padx=6, pady=6)
+
+        row = ttk.Frame(head)
+        row.pack(fill="x")
+        ttk.Label(row, text="Cible :").pack(side="left")
+        self.a_target_var = tk.StringVar(value="Toi-216")
+        ttk.Entry(row, textvariable=self.a_target_var, width=22).pack(side="left", padx=4)
+        ttk.Label(row, text="Mission :").pack(side="left", padx=(8, 0))
+        self.a_mission_var = tk.StringVar(value="")
+        ttk.Combobox(
+            row, values=["", "TESS", "Kepler", "K2"], textvariable=self.a_mission_var, width=7, state="readonly"
+        ).pack(side="left", padx=4)
+        ttk.Button(row, text="Get List Satellite Files", command=self._a_search).pack(side="left", padx=8)
+
+        list_frm = ttk.LabelFrame(frm, text="2. Sélectionner et télécharger", padding=8)
+        list_frm.pack(fill="both", expand=True, padx=6, pady=6)
+
+        cols = ("ok", "mission", "author", "year", "exptime", "target_name")
+        self.a_tree = ttk.Treeview(list_frm, columns=cols, show="headings", height=10)
+        for c, w in zip(cols, (40, 80, 100, 60, 80, 160)):
+            self.a_tree.heading(c, text=c)
+            self.a_tree.column(c, width=w, anchor="w")
+        self.a_tree.pack(fill="both", expand=True, side="left")
+        sb = ttk.Scrollbar(list_frm, orient="vertical", command=self.a_tree.yview)
+        sb.pack(side="right", fill="y")
+        self.a_tree.configure(yscrollcommand=sb.set)
+        self.a_tree.bind("<Double-1>", self._a_toggle_ok)
+
+        btn_frm = ttk.Frame(frm)
+        btn_frm.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(btn_frm, text="Tout cocher", command=lambda: self._a_set_all(True)).pack(side="left")
+        ttk.Button(btn_frm, text="Tout décocher", command=lambda: self._a_set_all(False)).pack(side="left", padx=4)
+        ttk.Button(btn_frm, text="Télécharger sélection", command=self._a_download).pack(side="left", padx=8)
+
+    def _a_search(self) -> None:
+        target = self.a_target_var.get().strip()
+        mission = self.a_mission_var.get().strip() or None
+        if not target:
+            messagebox.showwarning("Cible manquante", "Renseignez un nom de cible.")
+            return
+
+        self._set_busy(f"Recherche MAST pour « {target} »…")
+        self.a_tree.delete(*self.a_tree.get_children())
+
+        def worker():
+            try:
+                rows = list_satellite_lightcurves(target, mission=mission)
+                self._post_threadsafe(self._a_fill_results, rows)
+            except Exception as exc:
+                logger.exception("Recherche MAST échouée")
+                self._post_threadsafe(messagebox.showerror, "Recherche MAST", str(exc))
+                self._post_threadsafe(self._set_busy, "Erreur recherche MAST.")
+
+        Thread(target=worker, daemon=True).start()
+
+    def _a_fill_results(self, rows: List[Dict[str, Any]]) -> None:
+        for r in rows:
+            self.a_tree.insert(
+                "",
+                "end",
+                iid=str(r["index"]),
+                values=("✓" if r["ok"] else "", r["mission"], r["author"], r["year"], r["exptime"], r["target_name"]),
+            )
+        self._set_busy(f"{len(rows)} fichier(s) trouvé(s) sur MAST.")
+
+    def _a_toggle_ok(self, _event) -> None:
+        sel = self.a_tree.focus()
+        if not sel:
+            return
+        vals = list(self.a_tree.item(sel, "values"))
+        vals[0] = "" if vals[0] else "✓"
+        self.a_tree.item(sel, values=vals)
+
+    def _a_set_all(self, ok: bool) -> None:
+        for iid in self.a_tree.get_children():
+            vals = list(self.a_tree.item(iid, "values"))
+            vals[0] = "✓" if ok else ""
+            self.a_tree.item(iid, values=vals)
+
+    def _a_download(self) -> None:
+        selected = [
+            int(iid) for iid in self.a_tree.get_children() if self.a_tree.item(iid, "values")[0]
+        ]
+        if not selected:
+            messagebox.showinfo("Aucune sélection", "Cochez au moins une ligne (double-clic) puis Télécharger.")
+            return
+        out_dir = work_subdir("1_RawFiles") / self.a_target_var.get().strip().replace(" ", "_")
+
+        def worker():
+            saved: List[Path] = []
+            for idx in selected:
+                try:
+                    self._post_threadsafe(self._set_busy, f"Téléchargement index {idx}…")
+                    p = download_satellite_lightcurve(idx, out_dir)
+                    saved.append(p)
+                except Exception as exc:
+                    logger.exception("Téléchargement %s échoué", idx)
+                    self._post_threadsafe(messagebox.showerror, "Téléchargement", f"Index {idx} : {exc}")
+            if saved:
+                self._post_threadsafe(messagebox.showinfo, "Téléchargement", f"{len(saved)} LC enregistrées :\n{out_dir}")
+                self._post_threadsafe(self._set_busy, f"Téléchargements terminés ({len(saved)}).")
+
+        Thread(target=worker, daemon=True).start()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # B. NASA / AAVSO
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_b(self) -> None:
+        frm = self.tab_b
+        ttk.Label(
+            frm,
+            text=(
+                "Télécharger des observations AAVSO via NASA Exoplanet Watch.\n"
+                "Pour le moment, on s'appuie sur les fichiers HOPS-compatibles (time, flux, flux_err).\n"
+                "Téléversez vos propres fichiers ou un export AAVSO/HOPS pour les inclure dans le pipeline."
+            ),
+            justify="left",
+            wraplength=560,
+        ).pack(anchor="w", padx=10, pady=10)
+
+        row = ttk.Frame(frm)
+        row.pack(fill="x", padx=10)
+        ttk.Button(row, text="Importer fichiers HOPS / AAVSO…", command=self._b_import_files).pack(side="left")
+        ttk.Button(row, text="Ouvrir le dossier 1_RawFiles…", command=lambda: os.startfile(work_subdir("1_RawFiles"))).pack(
+            side="left", padx=8
+        )
+
+        self.b_imported_var = tk.StringVar(value="Aucun fichier importé.")
+        ttk.Label(frm, textvariable=self.b_imported_var, foreground="gray").pack(anchor="w", padx=10, pady=(8, 0))
+
+    def _b_import_files(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Fichiers AAVSO / HOPS (time flux flux_err)",
+            filetypes=[("HOPS/AAVSO", "*.txt *.csv *.dat"), ("Tous", "*.*")],
+        )
+        if not paths:
+            return
+        dest = work_subdir("1_RawFiles") / "imports"
+        dest.mkdir(parents=True, exist_ok=True)
+        n = 0
+        for p in paths:
+            try:
+                lc = _read_lightcurve_csv(Path(p))
+                out = dest / (Path(p).stem + ".csv")
+                arr = np.column_stack([lc["time"], lc["flux"], lc["flux_err"]])
+                np.savetxt(out, arr, delimiter=",", header="time_bjd_tdb,flux,flux_err", comments="")
+                n += 1
+            except Exception as exc:
+                logger.exception("Import %s impossible : %s", p, exc)
+        self.b_imported_var.set(f"{n} fichier(s) importé(s) dans {dest}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # C. Get Planet (ExoClock + NASA Archive)
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_c(self) -> None:
+        frm = self.tab_c
+        top = ttk.LabelFrame(frm, text="1. Récupérer les éphémérides", padding=8)
+        top.pack(fill="x", padx=6, pady=6)
+
+        row = ttk.Frame(top)
+        row.pack(fill="x")
+        ttk.Label(row, text="Nom planète :").pack(side="left")
+        self.c_name_var = tk.StringVar(value="WASP-12 b")
+        ttk.Entry(row, textvariable=self.c_name_var, width=20).pack(side="left", padx=4)
+        ttk.Button(row, text="from ExoClock", command=lambda: self._c_fetch("exoclock")).pack(side="left", padx=4)
+        ttk.Button(row, text="from NASA Archive", command=lambda: self._c_fetch("nasa")).pack(side="left", padx=4)
+        ttk.Button(row, text="Charger fichier…", command=self._c_load_file).pack(side="left", padx=4)
+        ttk.Button(row, text="Enregistrer…", command=self._c_save_file).pack(side="left", padx=4)
+
+        body = ttk.LabelFrame(frm, text="2. Paramètres système (modifiables)", padding=8)
+        body.pack(fill="both", expand=True, padx=6, pady=6)
+
+        self.c_entries: Dict[str, tk.StringVar] = {}
+        fields = [
+            ("name", "Nom"),
+            ("ra_deg", "RA [deg]"),
+            ("dec_deg", "DEC [deg]"),
+            ("teff", "Teff [K]"),
+            ("logg", "log g [cgs]"),
+            ("feh", "[Fe/H]"),
+            ("rstar_rsun", "R*  [Rsun]"),
+            ("mstar_msun", "M*  [Msun]"),
+            ("period_d", "P [j]"),
+            ("t0_bjd", "T0 [BJD_TDB]"),
+            ("rp_over_rs", "Rp/Rs"),
+            ("sma_over_rs", "a/Rs"),
+            ("inclination_deg", "inc [deg]"),
+            ("eccentricity", "ecc"),
+            ("arg_periastron_deg", "ω [deg]"),
+            ("duration_d", "Durée transit [j]"),
+            ("source", "Source"),
+        ]
+        for i, (key, label) in enumerate(fields):
+            r, c = divmod(i, 2)
+            ttk.Label(body, text=label + " :", anchor="e").grid(row=r, column=c * 2, sticky="e", padx=4, pady=2)
+            var = tk.StringVar(value=str(getattr(self.planet, key)))
+            self.c_entries[key] = var
+            ttk.Entry(body, textvariable=var, width=22).grid(row=r, column=c * 2 + 1, sticky="ew", padx=4, pady=2)
+        body.columnconfigure(1, weight=1)
+        body.columnconfigure(3, weight=1)
+
+        ttk.Button(frm, text="Appliquer ces paramètres", command=self._c_apply).pack(pady=4)
+
+    def _c_fetch(self, source: str) -> None:
+        name = self.c_name_var.get().strip()
+        if not name:
+            return
+        self._set_busy(f"Interrogation {source} pour « {name} »…")
+
+        def worker():
+            try:
+                pl = (
+                    fetch_planet_from_exoclock(name)
+                    if source == "exoclock"
+                    else fetch_planet_from_nasa_archive(name)
+                )
+                self._post_threadsafe(self._c_populate, pl)
+            except Exception as exc:
+                logger.exception("Recherche planète échouée")
+                self._post_threadsafe(messagebox.showerror, "Get Planet", str(exc))
+                self._post_threadsafe(self._set_busy, "Recherche planète : échec.")
+
+        Thread(target=worker, daemon=True).start()
+
+    def _c_populate(self, pl: PlanetParams) -> None:
+        for key, var in self.c_entries.items():
+            var.set(str(getattr(pl, key)))
+        self.planet = pl
+        self._set_busy(f"Planète « {pl.name} » chargée ({pl.source}).")
+
+    def _c_apply(self) -> None:
+        try:
+            d = {}
+            for key, var in self.c_entries.items():
+                if key in ("name", "source"):
+                    d[key] = var.get()
+                else:
+                    d[key] = float(var.get())
+            self.planet = PlanetParams.from_dict(d)
+            self._set_busy(f"Paramètres système appliqués : {self.planet.name}.")
+        except ValueError as exc:
+            messagebox.showerror("Erreur valeur", str(exc))
+
+    def _c_save_file(self) -> None:
+        self._c_apply()
+        path = filedialog.asksaveasfilename(
+            title="Enregistrer paramètres planète",
+            defaultextension=".json",
+            initialdir=work_subdir("planets"),
+            filetypes=[("JSON", "*.json")],
+        )
+        if not path:
+            return
+        Path(path).write_text(json.dumps(self.planet.to_dict(), indent=2), encoding="utf-8")
+
+    def _c_load_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Charger paramètres planète",
+            initialdir=work_subdir("planets"),
+            filetypes=[("JSON", "*.json"), ("Tous", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            pl = PlanetParams.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+            self._c_populate(pl)
+        except Exception as exc:
+            messagebox.showerror("Chargement", str(exc))
+
+    # ──────────────────────────────────────────────────────────────────────
+    # D. Prepare Data
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_d(self) -> None:
+        frm = self.tab_d
+        top = ttk.LabelFrame(frm, text="1. Charger une light-curve", padding=8)
+        top.pack(fill="x", padx=6, pady=6)
+        row = ttk.Frame(top)
+        row.pack(fill="x")
+        ttk.Button(row, text="Charger fichier .csv / .txt", command=self._d_load_lc).pack(side="left")
+        self.d_lc_label = ttk.Label(row, text="Aucun fichier", foreground="gray")
+        self.d_lc_label.pack(side="left", padx=8)
+
+        opts = ttk.LabelFrame(frm, text="2. Découpage par cycle (transits attendus)", padding=8)
+        opts.pack(fill="x", padx=6, pady=6)
+        ttk.Label(opts, text="Demi-fenêtre (heures) :").grid(row=0, column=0, sticky="e")
+        self.d_window_var = tk.StringVar(value="6.0")
+        ttk.Entry(opts, textvariable=self.d_window_var, width=8).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(opts, text="Ordre polynôme baseline (Detrend) :").grid(row=0, column=2, sticky="e", padx=(10, 0))
+        self.d_detrend_var = tk.StringVar(value="2")
+        ttk.Spinbox(opts, from_=0, to=4, textvariable=self.d_detrend_var, width=4).grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Button(opts, text="Découper en cycles", command=self._d_slice).grid(row=0, column=4, padx=8)
+
+        # Liste des segments
+        list_frm = ttk.LabelFrame(frm, text="3. Cycles trouvés", padding=4)
+        list_frm.pack(fill="both", expand=True, padx=6, pady=6)
+        cols = ("cycle", "t_expected", "n_points", "file")
+        self.d_tree = ttk.Treeview(list_frm, columns=cols, show="headings", height=10)
+        for c, w in zip(cols, (60, 160, 80, 360)):
+            self.d_tree.heading(c, text=c)
+            self.d_tree.column(c, width=w, anchor="w")
+        self.d_tree.pack(fill="both", expand=True, side="left")
+        sb = ttk.Scrollbar(list_frm, orient="vertical", command=self.d_tree.yview)
+        sb.pack(side="right", fill="y")
+        self.d_tree.configure(yscrollcommand=sb.set)
+
+        ttk.Button(frm, text="Ouvrir 2_MidtimesFiles…", command=lambda: os.startfile(work_subdir("2_MidtimesFiles"))).pack(
+            anchor="w", padx=6
+        )
+
+    def _d_load_lc(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Light-curve (time, flux, flux_err)",
+            initialdir=work_subdir("1_RawFiles"),
+            filetypes=[("CSV/TXT", "*.csv *.txt *.dat"), ("Tous", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            lc = _read_lightcurve_csv(Path(path))
+            self.raw_lc = lc
+            self.raw_lc_path = Path(path)
+            self.d_lc_label.config(text=Path(path).name, foreground="green")
+            self._set_busy(f"LC chargée : {len(lc['time'])} points.")
+        except Exception as exc:
+            messagebox.showerror("Lecture LC", str(exc))
+
+    def _d_slice(self) -> None:
+        if self.raw_lc is None or self.raw_lc_path is None:
+            messagebox.showwarning("LC manquante", "Chargez d'abord une light-curve.")
+            return
+        self._c_apply()
+        try:
+            window_h = float(self.d_window_var.get())
+            detrend = int(self.d_detrend_var.get())
+        except ValueError:
+            messagebox.showerror("Paramètres", "Valeurs invalides pour fenêtre/ordre.")
+            return
+
+        f, fe = detrend_and_normalize(
+            self.raw_lc["time"], self.raw_lc["flux"], self.raw_lc["flux_err"], None, poly_order=detrend
+        )
+        segments = slice_transits(
+            self.raw_lc["time"],
+            f,
+            fe,
+            t0_bjd=self.planet.t0_bjd,
+            period_d=self.planet.period_d,
+            selection_hours=window_h,
+            duration_d=self.planet.duration_d,
+        )
+        if not segments:
+            messagebox.showinfo("Aucun transit", "Aucun transit attendu n'a assez de points dans la fenêtre.")
+            return
+
+        out_dir = work_subdir("2_MidtimesFiles") / Path(self.raw_lc_path).stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        self.segments = segments
+        self.segment_paths = []
+        self.d_tree.delete(*self.d_tree.get_children())
+        for seg in segments:
+            p = save_transit_segment(seg, out_dir)
+            self.segment_paths.append(p)
+            self.d_tree.insert(
+                "", "end",
+                values=(seg["cycle"], f"{seg['t_expected']:.5f}", len(seg["time"]), str(p))
+            )
+        self._set_busy(f"{len(segments)} cycle(s) sauvegardé(s) dans {out_dir}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # E. Transit Fitter (batman + ultranest + ExoTETHyS)
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_e(self) -> None:
+        frm = self.tab_e
+        cfg = ttk.LabelFrame(frm, text="1. Réglages du fit", padding=8)
+        cfg.pack(fill="x", padx=6, pady=6)
+
+        ttk.Label(cfg, text="Filtre :").grid(row=0, column=0, sticky="e")
+        self.e_filter_var = tk.StringVar(value="TESS")
+        ttk.Combobox(cfg, values=list(SUPPORTED_FILTERS), textvariable=self.e_filter_var, width=10, state="readonly").grid(
+            row=0, column=1, sticky="w", padx=4
+        )
+        ttk.Label(cfg, text="Exposition (s) :").grid(row=0, column=2, sticky="e")
+        self.e_exp_var = tk.StringVar(value="0.0")
+        ttk.Entry(cfg, textvariable=self.e_exp_var, width=8).grid(row=0, column=3, sticky="w", padx=4)
+        ttk.Label(cfg, text="Detrend ordre :").grid(row=0, column=4, sticky="e")
+        self.e_detrend_var = tk.StringVar(value="1")
+        ttk.Spinbox(cfg, from_=0, to=4, textvariable=self.e_detrend_var, width=4).grid(row=0, column=5, sticky="w", padx=4)
+
+        self.e_fit_rp_var = tk.BooleanVar(value=True)
+        self.e_fit_a_var = tk.BooleanVar(value=False)
+        self.e_fit_inc_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(cfg, text="fit Rp/Rs", variable=self.e_fit_rp_var).grid(row=1, column=0, sticky="w", padx=4, pady=4)
+        ttk.Checkbutton(cfg, text="fit a/Rs", variable=self.e_fit_a_var).grid(row=1, column=1, sticky="w", padx=4)
+        ttk.Checkbutton(cfg, text="fit inc.", variable=self.e_fit_inc_var).grid(row=1, column=2, sticky="w", padx=4)
+
+        ttk.Label(cfg, text="live points :").grid(row=1, column=3, sticky="e")
+        self.e_live_var = tk.StringVar(value="200")
+        ttk.Entry(cfg, textvariable=self.e_live_var, width=8).grid(row=1, column=4, sticky="w", padx=4)
+        ttk.Label(cfg, text="dlogz :").grid(row=1, column=5, sticky="e")
+        self.e_dlogz_var = tk.StringVar(value="0.5")
+        ttk.Entry(cfg, textvariable=self.e_dlogz_var, width=8).grid(row=1, column=6, sticky="w", padx=4)
+
+        row = ttk.Frame(frm)
+        row.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row, text="Charger dossier de cycles…", command=self._e_load_folder).pack(side="left")
+        ttk.Button(row, text="Lancer fits (batman+ultranest)", command=self._e_run_fits).pack(side="left", padx=8)
+        ttk.Button(row, text="Enregistrer mid-times…", command=self._e_save_midtimes).pack(side="left")
+
+        list_frm = ttk.LabelFrame(frm, text="2. Résultats", padding=4)
+        list_frm.pack(fill="both", expand=True, padx=6, pady=6)
+        cols = ("cycle", "t0_bjd", "err_minus", "err_plus", "rp_over_rs", "chi2_red", "n_points")
+        self.e_tree = ttk.Treeview(list_frm, columns=cols, show="headings", height=10)
+        for c, w in zip(cols, (60, 150, 90, 90, 100, 90, 80)):
+            self.e_tree.heading(c, text=c)
+            self.e_tree.column(c, width=w, anchor="w")
+        self.e_tree.pack(fill="both", expand=True, side="left")
+        sb = ttk.Scrollbar(list_frm, orient="vertical", command=self.e_tree.yview)
+        sb.pack(side="right", fill="y")
+        self.e_tree.configure(yscrollcommand=sb.set)
+
+    def _e_load_folder(self) -> None:
+        d = filedialog.askdirectory(title="Dossier des cycles (étape D)", initialdir=work_subdir("2_MidtimesFiles"))
+        if not d:
+            return
+        files = sorted(Path(d).glob("cycle_*.csv"))
+        if not files:
+            messagebox.showinfo("Aucun cycle", f"Aucun cycle_*.csv dans {d}")
+            return
+        self.segment_paths = files
+        self.segments = []
+        for fp in files:
+            try:
+                lc = _read_lightcurve_csv(fp)
+                # cycle = ce qui suit "cycle_" dans le nom
+                stem = fp.stem
+                try:
+                    cycle = int(stem.split("_")[-1])
+                except Exception:
+                    cycle = 0
+                self.segments.append(
+                    {"cycle": cycle, "t_expected": float(np.median(lc["time"])), "time": lc["time"], "flux": lc["flux"], "flux_err": lc["flux_err"]}
+                )
+            except Exception as exc:
+                logger.exception("Lecture %s impossible : %s", fp, exc)
+        self._set_busy(f"{len(self.segments)} cycle(s) chargé(s) depuis {d}")
+
+    def _e_run_fits(self) -> None:
+        if not self.segments:
+            messagebox.showwarning("Aucun cycle", "Chargez ou découpez des cycles d'abord.")
+            return
+        self._c_apply()
+
+        try:
+            filt = self.e_filter_var.get()
+            exp_s = float(self.e_exp_var.get())
+            detrend = int(self.e_detrend_var.get())
+            live = int(self.e_live_var.get())
+            dlogz = float(self.e_dlogz_var.get())
+        except ValueError:
+            messagebox.showerror("Paramètres", "Valeur de fit invalide.")
+            return
+
+        fit_rp = self.e_fit_rp_var.get()
+        fit_a = self.e_fit_a_var.get()
+        fit_inc = self.e_fit_inc_var.get()
+        planet = self.planet
+        segments = list(self.segments)
+
+        self.fit_results = []
+        self.e_tree.delete(*self.e_tree.get_children())
+
+        def worker():
+            for seg in segments:
+                try:
+                    self._post_threadsafe(self._set_busy, f"Fit cycle {seg['cycle']:+d}…")
+                    res = fit_transit_batman_ultranest(
+                        time=seg["time"],
+                        flux=seg["flux"],
+                        flux_err=seg["flux_err"],
+                        planet=planet,
+                        cycle=int(seg["cycle"]),
+                        filter_ui=filt,
+                        fit_rp=fit_rp,
+                        fit_a_rs=fit_a,
+                        fit_inc=fit_inc,
+                        detrend_order=detrend,
+                        exp_time_s=exp_s,
+                        min_num_live_points=live,
+                        dlogz=dlogz,
+                        progress_callback=lambda m: self._post_threadsafe(self._set_busy, m),
+                    )
+                    self.fit_results.append(res)
+                    self._post_threadsafe(self._e_add_row, res)
+                except Exception as exc:
+                    logger.exception("Fit cycle %s échoué", seg.get("cycle"))
+                    self._post_threadsafe(messagebox.showerror, "Fit", f"Cycle {seg.get('cycle')} : {exc}")
+            self._post_threadsafe(self._set_busy, f"Fits terminés : {len(self.fit_results)} résultat(s).")
+
+        Thread(target=worker, daemon=True).start()
+
+    def _e_add_row(self, res: TransitFitResult) -> None:
+        self.e_tree.insert(
+            "",
+            "end",
+            values=(
+                res.cycle,
+                f"{res.t0_bjd:.6f}",
+                f"{res.t0_err_minus * 24 * 60:.2f}m",
+                f"{res.t0_err_plus * 24 * 60:.2f}m",
+                f"{res.rp_over_rs:.5f}",
+                f"{res.chi2_red:.2f}",
+                res.n_points,
+            ),
+        )
+
+    def _e_save_midtimes(self) -> None:
+        if not self.fit_results:
+            return
+        out = filedialog.asksaveasfilename(
+            title="Enregistrer mid-times",
+            initialdir=work_subdir("3_MidTimes"),
+            defaultextension=".csv",
+            initialfile=f"midtimes_{self.planet.name.replace(' ', '_') or 'planet'}.csv",
+        )
+        if not out:
+            return
+        save_midtimes(self.fit_results, Path(out))
+        self._set_busy(f"{len(self.fit_results)} mid-time(s) enregistrés : {out}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # F. Transit Merger
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_f(self) -> None:
+        frm = self.tab_f
+        row = ttk.Frame(frm)
+        row.pack(fill="x", padx=6, pady=6)
+        ttk.Button(row, text="Charger fichier mid-times A…", command=lambda: self._f_load("a")).pack(side="left")
+        ttk.Button(row, text="Charger fichier mid-times B…", command=lambda: self._f_load("b")).pack(side="left", padx=4)
+        ttk.Button(row, text="Fusionner A + B", command=self._f_merge).pack(side="left", padx=8)
+        ttk.Button(row, text="Enregistrer fusion…", command=self._f_save).pack(side="left")
+
+        body = ttk.Frame(frm)
+        body.pack(fill="both", expand=True, padx=6, pady=6)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        self.f_tree_a = self._make_merger_tree(body, 0, 0, "A")
+        self.f_tree_b = self._make_merger_tree(body, 0, 1, "B")
+        self.f_tree_m = self._make_merger_tree(frm, None, None, "Fusion")
+        self.f_tree_m.master.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+        self._merger_data = {"a": [], "b": [], "m": []}
+
+    def _make_merger_tree(self, parent, r: Optional[int], c: Optional[int], title: str):
+        frm = ttk.LabelFrame(parent, text=title, padding=4)
+        if r is not None and c is not None:
+            frm.grid(row=r, column=c, sticky="nsew", padx=4)
+        cols = ("ok", "cycle", "midtime", "err_minus", "err_plus")
+        tree = ttk.Treeview(frm, columns=cols, show="headings", height=8)
+        for k, w in zip(cols, (40, 60, 160, 90, 90)):
+            tree.heading(k, text=k)
+            tree.column(k, width=w, anchor="w")
+        tree.pack(fill="both", expand=True)
+        return tree
+
+    def _f_load(self, which: str) -> None:
+        p = filedialog.askopenfilename(
+            title=f"Mid-times {which.upper()}",
+            initialdir=work_subdir("3_MidTimes"),
+            filetypes=[("CSV", "*.csv"), ("Tous", "*.*")],
+        )
+        if not p:
+            return
+        try:
+            rows = load_midtimes(Path(p))
+        except Exception as exc:
+            messagebox.showerror("Lecture", str(exc))
+            return
+        self._merger_data[which] = rows
+        tree = self.f_tree_a if which == "a" else self.f_tree_b
+        tree.delete(*tree.get_children())
+        for r in rows:
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    "✓" if r.get("ok", 1) else "",
+                    r.get("cycle", 0),
+                    f"{r.get('transit_midtime', 0.0):.6f}",
+                    f"{r.get('transit_midtime_min', 0.0):.6f}",
+                    f"{r.get('transit_midtime_plus', 0.0):.6f}",
+                ),
+            )
+        self._set_busy(f"{len(rows)} ligne(s) chargée(s) dans {which.upper()}.")
+
+    def _f_merge(self) -> None:
+        self._c_apply()
+        merged = merge_midtimes(
+            self._merger_data["a"],
+            self._merger_data["b"],
+            period_d=self.planet.period_d,
+        )
+        self._merger_data["m"] = merged
+        self.f_tree_m.delete(*self.f_tree_m.get_children())
+        for r in merged:
+            self.f_tree_m.insert(
+                "",
+                "end",
+                values=(
+                    "✓" if r.get("ok", 1) else "",
+                    r.get("cycle", 0),
+                    f"{r.get('transit_midtime', 0.0):.6f}",
+                    f"{r.get('transit_midtime_min', 0.0):.6f}",
+                    f"{r.get('transit_midtime_plus', 0.0):.6f}",
+                ),
+            )
+        self.merger_rows = merged
+        self._set_busy(f"Fusion : {len(merged)} ligne(s).")
+
+    def _f_save(self) -> None:
+        if not self.merger_rows:
+            return
+        p = filedialog.asksaveasfilename(
+            title="Enregistrer fusion",
+            defaultextension=".csv",
+            initialdir=work_subdir("3_MidTimes"),
+            initialfile="midtimes_merged.csv",
+        )
+        if not p:
+            return
+        cols = ["ok", "cycle", "transit_midtime", "transit_midtime_min", "transit_midtime_plus"]
+        with Path(p).open("w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            for r in self.merger_rows:
+                w.writerow({k: r.get(k, "") for k in cols})
+
+    # ──────────────────────────────────────────────────────────────────────
+    # G. TTV (O-C)
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_g(self) -> None:
+        frm = self.tab_g
+        row = ttk.Frame(frm)
+        row.pack(fill="x", padx=6, pady=6)
+        ttk.Button(row, text="Charger mid-times…", command=self._g_load).pack(side="left")
+        ttk.Label(row, text="Modèle :").pack(side="left", padx=(8, 0))
+        self.g_model_var = tk.StringVar(value="linear")
+        ttk.Combobox(row, values=["linear", "quadratic", "sin"], textvariable=self.g_model_var,
+                     width=10, state="readonly").pack(side="left", padx=4)
+        ttk.Button(row, text="Fit O-C", command=self._g_fit).pack(side="left", padx=8)
+        ttk.Button(row, text="Enregistrer résultat…", command=self._g_save).pack(side="left")
+        ttk.Button(
+            row,
+            text="Aide (manuel)…",
+            command=lambda: open_user_manual_chapter(
+                "48-workflow-exoplanetpie-natif", self.winfo_toplevel()
+            ),
+        ).pack(side="right", padx=4)
+
+        # Figure O-C
+        self.g_fig = Figure(figsize=(7, 4), dpi=100)
+        self.g_ax = self.g_fig.add_subplot(111)
+        self.g_ax.set_xlabel("Cycle")
+        self.g_ax.set_ylabel("O - C (minutes)")
+        self.g_canvas = FigureCanvasTkAgg(self.g_fig, master=frm)
+        self.g_canvas.draw()
+        self.g_canvas.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
+        toolbar = NavigationToolbar2Tk(self.g_canvas, frm, pack_toolbar=False)
+        toolbar.update()
+        toolbar.pack(side="bottom", fill="x")
+
+        self.g_summary_var = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.g_summary_var, anchor="w", justify="left").pack(fill="x", padx=6)
+
+        self._g_rows: List[Dict[str, Any]] = []
+
+    def _g_load(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Mid-times à analyser",
+            initialdir=work_subdir("3_MidTimes"),
+            filetypes=[("CSV", "*.csv"), ("Tous", "*.*")],
+        )
+        if not p:
+            return
+        try:
+            self._g_rows = load_midtimes(Path(p))
+        except Exception as exc:
+            messagebox.showerror("Lecture", str(exc))
+            return
+        self._set_busy(f"TTV : {len(self._g_rows)} mid-times chargés.")
+
+    def _g_fit(self) -> None:
+        if not self._g_rows:
+            messagebox.showwarning("Aucun mid-time", "Chargez d'abord un fichier mid-times.")
+            return
+        try:
+            result = fit_ttv(self._g_rows, model=self.g_model_var.get())
+        except Exception as exc:
+            messagebox.showerror("Fit O-C", str(exc))
+            return
+
+        self.last_ttv_result = result
+        self.g_ax.clear()
+        self.g_ax.errorbar(
+            result.cycles,
+            result.o_minus_c_d * 24 * 60,
+            yerr=[
+                [r.get("transit_midtime_min", 0.001) * 24 * 60 for r in self._g_rows[: len(result.cycles)]],
+                [r.get("transit_midtime_plus", 0.001) * 24 * 60 for r in self._g_rows[: len(result.cycles)]],
+            ],
+            fmt="o",
+            ms=4,
+        )
+        self.g_ax.axhline(0, color="gray", lw=0.5)
+        self.g_ax.set_xlabel("Cycle")
+        self.g_ax.set_ylabel("O - C (minutes)")
+        self.g_ax.set_title(
+            f"{self.planet.name or 'TTV'} — modèle {result.model}, χ²_r = {result.chi2_red:.2f}, RMS = {result.rms_minutes:.2f} min"
+        )
+        self.g_canvas.draw()
+
+        extra = ", ".join(f"{k} = {v:.6g}" for k, v in result.extra.items())
+        self.g_summary_var.set(
+            f"P = {result.period_d:.8f} j ; T0 = {result.t0_bjd:.6f} BJD ; "
+            f"{extra if extra else 'aucun paramètre supplémentaire'}"
+        )
+        self._set_busy(f"Fit TTV ({result.model}) terminé.")
+
+    def _g_save(self) -> None:
+        if self.last_ttv_result is None:
+            return
+        p = filedialog.asksaveasfilename(
+            title="Enregistrer résultat TTV",
+            defaultextension=".json",
+            initialdir=work_subdir("4_TTVFitter"),
+            initialfile=f"ttv_{self.planet.name.replace(' ', '_') or 'planet'}_{self.last_ttv_result.model}.json",
+        )
+        if not p:
+            return
+        save_ttv_result(self.last_ttv_result, Path(p))
+        self._set_busy(f"Résultat TTV sauvegardé : {p}")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # H. Visualizer
+    # ──────────────────────────────────────────────────────────────────────
+    def _build_tab_h(self) -> None:
+        frm = self.tab_h
+        row = ttk.Frame(frm)
+        row.pack(fill="x", padx=6, pady=6)
+        ttk.Button(row, text="Get TTV Analysis Result…", command=self._h_load).pack(side="left")
+        self.h_summary = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.h_summary, justify="left", anchor="w").pack(fill="x", padx=6, pady=4)
+
+        self.h_fig = Figure(figsize=(7, 4), dpi=100)
+        self.h_ax = self.h_fig.add_subplot(111)
+        self.h_canvas = FigureCanvasTkAgg(self.h_fig, master=frm)
+        self.h_canvas.draw()
+        self.h_canvas.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _h_load(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Résultat TTV (.json)",
+            initialdir=work_subdir("4_TTVFitter"),
+            filetypes=[("JSON", "*.json"), ("Tous", "*.*")],
+        )
+        if not p:
+            return
+        try:
+            result = load_ttv_result(Path(p))
+        except Exception as exc:
+            messagebox.showerror("Visualiser TTV", str(exc))
+            return
+
+        self.h_ax.clear()
+        self.h_ax.plot(result.cycles, result.o_minus_c_d * 24 * 60, "o", ms=4)
+        self.h_ax.axhline(0, color="gray", lw=0.5)
+        self.h_ax.set_xlabel("Cycle")
+        self.h_ax.set_ylabel("O - C (minutes)")
+        self.h_ax.set_title(
+            f"{Path(p).stem} — modèle {result.model}, χ²_r = {result.chi2_red:.2f}, RMS = {result.rms_minutes:.2f} min"
+        )
+        self.h_canvas.draw()
+
+        extra = ", ".join(f"{k} = {v:.6g}" for k, v in result.extra.items())
+        self.h_summary.set(
+            f"Fichier : {p}\nP = {result.period_d:.8f} j ; T0 = {result.t0_bjd:.6f} BJD ; "
+            f"{extra if extra else '∅'}"
+        )
+        self._set_busy(f"TTV affiché : {Path(p).name}")
+
+
 class PhotometryExoplanetsTab(ttk.Frame):
     """
-    Onglet de photométrie exoplanètes.
-    Workflow en 6 étapes (référence, cibles, ouvertures, batch, analyse, rapports).
+    Onglet photométrie exoplanètes : HOPS modifié (gauche) et workflow ExoPlanetPie natif (droite).
     """
 
     def __init__(self, parent, base_dir=None):
         super().__init__(parent, padding=0)
         self.base_dir = str(base_dir) if base_dir is not None else None
+        self.data_analysis_tab = None
         
         # Instanciation du pipeline
         self.pipeline = PhotometryPipeline()
@@ -90,11 +1089,23 @@ class PhotometryExoplanetsTab(ttk.Frame):
         self.create_widgets()
 
     def create_widgets(self):
-        right_frame = ttk.Frame(self, padding=10)
-        right_frame.pack(fill=tk.BOTH, expand=True)
+        main_paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True)
 
-        hops_frame = ttk.LabelFrame(right_frame, text="HOPS", padding=8)
-        hops_frame.pack(fill="both", expand=True, pady=(0, 2))
+        left_frame = ttk.Frame(main_paned, padding=0)
+        right_frame = ttk.Frame(main_paned, padding=0)
+        main_paned.add(left_frame, weight=1)
+        main_paned.add(right_frame, weight=1)
+        add_manual_help_header(left_frame, "4-photométrie-exoplanètes")
+        try:
+            main_paned.pane(left_frame, minsize=260)
+            main_paned.pane(right_frame, minsize=380)
+        except tk.TclError:
+            pass
+        self.after_idle(lambda: self._set_photometry_paned_sash(main_paned))
+
+        hops_frame = ttk.LabelFrame(left_frame, text="HOPS modifié", padding=8)
+        hops_frame.pack(fill="both", expand=True, pady=4, padx=(4, 2))
 
         hops_btn_row = ttk.Frame(hops_frame)
         hops_btn_row.pack(fill="x")
@@ -136,6 +1147,42 @@ class PhotometryExoplanetsTab(ttk.Frame):
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(hops_frame, variable=self.progress_var, maximum=100)
         self.lbl_progress = ttk.Label(hops_frame, text="En attente...", font=("Arial", 8))
+
+        # Panneau droit : même onglet que HOPS — workflow ExoPlanetPie natif (A … H), dans un cadre dédié.
+        workflow_outer = ttk.LabelFrame(
+            right_frame,
+            text="Workflow ExoPlanetPie natif (batman · ultranest · ExoTETHyS)",
+            padding=4,
+        )
+        workflow_outer.pack(fill=tk.BOTH, expand=True, padx=(2, 4), pady=4)
+        analysis_host = ttk.Frame(workflow_outer)
+        analysis_host.pack(fill=tk.BOTH, expand=True)
+        try:
+            self.data_analysis_tab = ExoplanetPieWorkflowTab(analysis_host, show_manual_help=False)
+        except Exception as e:
+            logging.error(
+                "Intégration ExoPlanetPie workflow dans Photométrie Exoplanètes impossible: %s",
+                e,
+                exc_info=True,
+            )
+            self.data_analysis_tab = None
+            ttk.Label(
+                analysis_host,
+                text=f"ExoPlanetPie workflow indisponible :\n{e}",
+                foreground="red",
+                wraplength=420,
+                justify="left",
+            ).pack(anchor="w", padx=8, pady=8)
+
+    def _set_photometry_paned_sash(self, paned: ttk.Panedwindow) -> None:
+        """Place la séparation ~45 % / 55 % (HOPS / analyse) après géométrie connue."""
+        try:
+            paned.update_idletasks()
+            w = int(paned.winfo_width())
+            if w > 80:
+                paned.sashpos(0, max(200, int(w * 0.45)))
+        except tk.TclError:
+            pass
 
     def _build_hops_scrollable_embed(self) -> None:
         scroll_wrap = ttk.Frame(self.hops_embed_host)
@@ -217,64 +1264,16 @@ class PhotometryExoplanetsTab(ttk.Frame):
         self._bind_hops_embed_mousewheel(self.hops_isolated_container)
 
     def browse_ref(self):
-        initial = self.base_dir or os.getcwd()
-        path = filedialog.askopenfilename(
-            title="Sélectionner l'image de référence (Solved)",
-            initialdir=initial,
-            filetypes=[("FITS files", "*.fits *.fit *.fts")]
+        """Legacy NPOAP (sélection FITS + target_selector) — remplacé par HOPS."""
+        messagebox.showinfo(
+            "Photométrie FITS",
+            "La photométrie sur images FITS dans cet onglet passe par HOPS (panneau gauche).\n"
+            "Utilisez « Lancer HOPS » pour T1, comparateurs et ouvertures.",
         )
-        if path:
-            self.ref_image = path
-            self.lbl_ref.config(text=Path(path).name, foreground="green")
-            self.btn_select.config(state="normal")
-            logging.info(f"Image de référence : {path}")
 
     def launch_selector(self):
-        if not self.ref_image: return
-        
-        def read_header_target_coord(fits_path):
-            try:
-                with fits.open(fits_path) as hdul:
-                    header = hdul[0].header
-                ra_h = header.get("OBJCTRA") or header.get("RA")
-                dec_h = header.get("OBJCTDEC") or header.get("DEC")
-                if ra_h and dec_h:
-                    try:
-                        ra_val = float(ra_h)
-                        dec_val = float(dec_h)
-                        if ra_val > 24.0:
-                            return SkyCoord(ra_val, dec_val, unit=(u.deg, u.deg))
-                    except Exception:
-                        pass
-                    try:
-                        return SkyCoord(ra_h, dec_h, unit=(u.hourangle, u.deg))
-                    except Exception:
-                        return SkyCoord(float(ra_h), float(dec_h), unit=(u.deg, u.deg))
-            except Exception as e:
-                logging.warning(f"Coordonnées du header indisponibles: {e}")
-            return None
-
-        def on_done(fits_path, target_data, comps_list):
-            # target_data peut être un dict avec 'coord' et optionnellement 'fwhm', ou directement une SkyCoord
-            if isinstance(target_data, dict):
-                t1 = target_data['coord']
-            else:
-                t1 = target_data
-            
-            self.target_coord = t1
-            self.comp_coords = comps_list 
-            self.current_selections = []
-            self.current_selections.append({'label': 'T1', 'coord': t1, 'r_ap': 8.0, 'r_in': 12.0, 'r_out': 18.0})
-            for i, c in enumerate(comps_list):
-                self.current_selections.append({'label': f'C{i+1}', 'coord': c, 'r_ap': 8.0, 'r_in': 12.0, 'r_out': 18.0})
-            self.lbl_targets.config(text=f"T1: OK\nComps: {len(comps_list)}")
-            self.btn_aperture.config(state="normal")
-            self.lbl_aperture_status.config(text="Prêt à régler", foreground="orange")
-            logging.info("Sélection terminée → Étape 3 disponible")
-            self.open_aperture_dialog()  # Fluidité
-
-        header_target_coord = read_header_target_coord(self.ref_image)
-        launch_target_selection(self.ref_image, on_selection_done=on_done, header_target_coord=header_target_coord)
+        """Legacy — voir browse_ref ; ne plus appeler target_selector depuis cet onglet."""
+        self.browse_ref()
 
     def open_aperture_dialog(self):
         if not self.ref_image or not self.target_coord: return
@@ -425,7 +1424,15 @@ class PhotometryExoplanetsTab(ttk.Frame):
         return Path(__file__).resolve().parent.parent
 
     def _hops_base_dir(self) -> Path:
-        return self._npoap_root() / "external_apps" / "hops"
+        """Prefere HOPS Lite vendu, sinon external_apps/hops."""
+        root = self._npoap_root()
+        lite = root / "external_apps" / "lite" / "accessories" / "hops"
+        legacy = root / "external_apps" / "hops"
+        if (lite / "hops-master").is_dir():
+            return lite
+        if (legacy / "hops-master").is_dir():
+            return legacy
+        return lite if (root / "external_apps" / "lite").is_dir() else legacy
 
     def _hops_source_dir(self) -> Path:
         return self._hops_base_dir() / "hops-master"
@@ -439,10 +1446,16 @@ class PhotometryExoplanetsTab(ttk.Frame):
         return "HOPS non installé (utilisez le bouton d'installation depuis ZIP)."
 
     def _default_hops_zip(self) -> Path:
-        # Priorité à l'archive fournie dans la distribution NPOAP.
-        bundled = self._hops_base_dir() / "HOPS-modified.zip"
-        if bundled.is_file():
-            return bundled
+        # Priorité : zip fourni à la racine external_apps, puis à côté de HOPS Lite.
+        root = self._npoap_root()
+        for bundled in (
+            root / "external_apps" / "hopsmodified.zip",
+            root / "external_apps" / "HOPS-modified.zip",
+            self._hops_base_dir() / "HOPS-modified.zip",
+            self._hops_base_dir() / "hopsmodified.zip",
+        ):
+            if bundled.is_file():
+                return bundled
         return Path.home() / "Downloads" / "hops-master.zip"
 
     def _ensure_hops_dependencies(self) -> None:
@@ -485,7 +1498,34 @@ class PhotometryExoplanetsTab(ttk.Frame):
         progress_dialog.update_idletasks()
         logging.info(f"HOPS: installation dépendances depuis {req}")
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(req)])
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", str(req)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            if proc.returncode != 0:
+                logging.error("HOPS pip install échec (code %s):\n%s", proc.returncode, out or "(pas de sortie)")
+                py = sys.executable
+                req_s = str(req)
+                if _pip_stderr_suggests_site_packages_denied(out):
+                    raise RuntimeError(
+                        "Installation des paquets HOPS refusée (accès en écriture à site-packages).\n\n"
+                        "Avec Miniconda installé pour tous les utilisateurs (dossier ProgramData), "
+                        "il faut souvent lancer pip une fois avec des droits administrateur, "
+                        "ou donner à votre compte le contrôle du dossier "
+                        r"…\envs\astroenv\Lib\site-packages"
+                        ".\n\n"
+                        "Ouvrez une invite de commandes ou PowerShell « Exécuter en tant qu’administrateur », puis :\n\n"
+                        f'    "{py}" -m pip install -r "{req_s}"\n\n'
+                        "Ensuite relancez « Lancer HOPS » depuis NPOAP."
+                    )
+                raise RuntimeError(
+                    "L’installation pip des dépendances HOPS a échoué.\n"
+                    "Consultez le journal NPOAP pour la sortie complète de pip."
+                )
         finally:
             progress_bar.stop()
             try:
@@ -608,7 +1648,55 @@ class PhotometryExoplanetsTab(ttk.Frame):
                 txt2 = txt2.replace(old_block, new_block, 1)
             app_file.write_text(txt2, encoding="utf-8")
 
+        self._patch_hops_on_embedded_close_fallback(app_file)
+
         self._patch_hops_embedded_frame_safe(app_windows)
+
+    def _patch_hops_on_embedded_close_fallback(self, app_file: Path) -> None:
+        """
+        Si le ZIP HOPS a une signature embarquée sans on_embedded_close (échec du patch
+        par chaîne exacte), complète le fichier pour éviter TypeError au lancement.
+        """
+        txt = app_file.read_text(encoding="utf-8", errors="replace")
+        if "on_embedded_close" in txt:
+            return
+        old = (
+            "    def __init__(self, embedded=False, host_root=None, host_frame=None):\n\n"
+            "        MainWindow.__init__(self, HOPSLog()"
+        )
+        new = (
+            "    def __init__(self, embedded=False, host_root=None, host_frame=None, "
+            "on_embedded_close=None):  # NPOAP: embedded close callback\n\n"
+            "        self._on_embedded_close = on_embedded_close if embedded else None\n\n"
+            "        MainWindow.__init__(self, HOPSLog()"
+        )
+        if old not in txt:
+            return
+        txt = txt.replace(old, new, 1)
+        if "    def close(self):\n        MainWindow.close(self)" not in txt:
+            anchor = "    def open_updates(self):"
+            insert = (
+                "    def close(self):\n"
+                "        MainWindow.close(self)\n"
+                "        if self.embedded and getattr(self, '_on_embedded_close', None):\n"
+                "            cb = self._on_embedded_close\n"
+                "            self._on_embedded_close = None\n"
+                "            try:\n"
+                "                cb()\n"
+                "            except Exception:\n"
+                "                traceback.print_exc()\n\n"
+                f"{anchor}"
+            )
+            if anchor in txt:
+                txt = txt.replace(anchor, insert, 1)
+        app_file.write_text(txt, encoding="utf-8")
+
+    @staticmethod
+    def _invalidate_hops_import_cache() -> None:
+        """Force le rechargement des modules hops depuis le disque après patch."""
+        for name in list(sys.modules):
+            if name == "hops" or name.startswith("hops."):
+                del sys.modules[name]
 
     def _patch_hops_embedded_frame_safe(self, app_windows: Path) -> None:
         """Complète le patch embarqué : Frame n'a pas geometry/protocol/mainloop."""
@@ -847,6 +1935,8 @@ class PhotometryExoplanetsTab(ttk.Frame):
             if str(source) not in sys.path:
                 sys.path.insert(0, str(source))
                 added_path = True
+            self._enable_hops_embedded_mode_source()
+            self._invalidate_hops_import_cache()
             self._ensure_hops_dependencies()
             self._register_gaia_filters_from_resources()
 
@@ -859,16 +1949,20 @@ class PhotometryExoplanetsTab(ttk.Frame):
 
             self._recreate_hops_isolated_container()
 
-            self.hops_app = HOPS(
+            hops_kw: dict = dict(
                 embedded=True,
-                # Root dédié au conteneur pour éviter toute prise de contrôle du root principal.
                 host_root=self.hops_isolated_container,
                 host_frame=self.hops_isolated_container,
-                on_embedded_close=self._on_hops_embedded_closed,
             )
+            if "on_embedded_close" in inspect.signature(HOPS.__init__).parameters:
+                hops_kw["on_embedded_close"] = self._on_hops_embedded_closed
+            self.hops_app = HOPS(**hops_kw)
             self.hops_app.run(f_after=self.hops_app.log.check_for_updates)
             self.hops_status_var.set(f"HOPS intégré dans le cadre depuis : {source}")
             logging.info(f"HOPS intégré dans l'onglet Exoplanètes: source={source}")
+        except RuntimeError as e:
+            logging.error("Lancement HOPS impossible: %s", e)
+            messagebox.showerror("HOPS — dépendances", str(e))
         except Exception as e:
             logging.error(f"Lancement HOPS impossible: {e}", exc_info=True)
             messagebox.showerror("HOPS", f"Impossible de lancer HOPS:\n{e}")
@@ -888,3 +1982,4 @@ class PhotometryExoplanetsTab(ttk.Frame):
         except Exception as e:
             logging.error(f"Réinitialisation HOPS impossible: {e}", exc_info=True)
             messagebox.showerror("HOPS", f"Impossible de réinitialiser HOPS:\n{e}")
+

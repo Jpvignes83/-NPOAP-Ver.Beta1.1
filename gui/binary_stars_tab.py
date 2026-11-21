@@ -9,6 +9,8 @@ import numpy as np
 from pathlib import Path
 import threading
 
+from gui.manual_help import add_manual_help_header
+
 logger = logging.getLogger(__name__)
 
 # Import de la fenêtre de visualisation
@@ -59,15 +61,29 @@ try:
     import phoebe
     PHOEBE_AVAILABLE = True
     logger.debug(f"[PHOEBE] Import réussi (readline mock actif sur Windows si besoin)")
-except (ImportError, Exception) as e:
+except ImportError as e:
     PHOEBE_AVAILABLE = False
-    logger.warning(f"PHOEBE2 n'est pas installé ou erreur d'import: {e}. Utilisez: pip install phoebe", exc_info=True)
+    logger.warning(
+        "PHOEBE2 n'est pas installé : %s. Optionnel — pip install phoebe dans astroenv.",
+        e,
+    )
+except Exception as e:
+    PHOEBE_AVAILABLE = False
+    logger.warning(
+        "PHOEBE2 : erreur d'import inattendue : %s",
+        e,
+        exc_info=True,
+    )
 
 
 class BinaryStarsTab(ttk.Frame):
     """
     Onglet pour la modélisation d'étoiles binaires avec PHOEBE2
     """
+
+    # log(g) maxi des tables CK2004 (assombrissement limbique Phoebe)
+    _PHOEBE_CK2004_LOGG_MAX = 5.0
+    _PHOEBE_LD_COEFFS_DEFAULT = [0.6, 0.4]
     
     def __init__(self, parent_notebook, base_dir=None):
         super().__init__(parent_notebook, padding=10)
@@ -88,7 +104,8 @@ class BinaryStarsTab(ttk.Frame):
     
     def create_widgets(self):
         """Crée l'interface utilisateur"""
-        
+        add_manual_help_header(self, "8-étoiles-binaires")
+
         # En-tête
         header_frame = ttk.Frame(self)
         header_frame.pack(fill="x", pady=(0, 10))
@@ -180,6 +197,21 @@ class BinaryStarsTab(ttk.Frame):
         ttk.Label(perio_params, text="Max P (j):").pack(side="left", padx=(0, 2))
         self.perio_max_p_var = tk.StringVar(value="10.0")
         ttk.Entry(perio_params, textvariable=self.perio_max_p_var, width=6).pack(side="left", padx=(0, 8))
+        self.perio_bls_detrend_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            perio_params,
+            text="Détrend poly (BLS)",
+            variable=self.perio_bls_detrend_var,
+        ).pack(side="left", padx=(4, 2))
+        ttk.Label(perio_params, text="°").pack(side="left")
+        self.perio_bls_deg_var = tk.StringVar(value="2")
+        ttk.Spinbox(
+            perio_params,
+            from_=1,
+            to=5,
+            width=3,
+            textvariable=self.perio_bls_deg_var,
+        ).pack(side="left", padx=(2, 0))
         perio_btns = ttk.Frame(perio_frame)
         perio_btns.pack(fill="x", pady=2)
         ttk.Button(perio_btns, text="Lomb-Scargle", command=lambda: self._run_periodogram("LS")).pack(side="left", padx=2)
@@ -379,6 +411,87 @@ class BinaryStarsTab(ttk.Frame):
         except Exception as e:
             logger.error(f"[PHOEBE] Erreur lors de la création du Bundle: {e}", exc_info=True)
             messagebox.showerror("Erreur", f"Erreur lors de la création du Bundle: {e}")
+
+    def _configure_phoebe_ld_if_needed(self):
+        """
+        Passe en atmosphère blackbody + limb darkening manuel si log(g) dépasse les
+        tables CK2004 ou si la période est courte (< 1 j) — fréquent après périodogramme.
+        """
+        if self.b is None:
+            return
+        b = self.b
+        compute = b.computes[0] if len(b.computes) else "phoebe01"
+        try:
+            comps = list(b.hierarchy.get_stars())
+        except Exception:
+            comps = ["primary", "secondary"]
+
+        need_manual = False
+        try:
+            period = float(b.get_value("period", context="binary", component="binary"))
+            if period < 1.0:
+                need_manual = True
+                logger.info(
+                    "[PHOEBE] Période %.6f j < 1 j → assombrissement limbique manuel requis",
+                    period,
+                )
+        except Exception as exc:
+            logger.debug("[PHOEBE] Lecture période ignorée: %s", exc)
+
+        for comp in comps:
+            try:
+                logg = float(b.get_value("logg", component=comp, context="component"))
+                if logg > self._PHOEBE_CK2004_LOGG_MAX:
+                    need_manual = True
+                    logger.info(
+                        "[PHOEBE] %s log(g)=%.3f hors tables CK2004 (max %.1f)",
+                        comp,
+                        logg,
+                        self._PHOEBE_CK2004_LOGG_MAX,
+                    )
+            except Exception as exc:
+                logger.debug("[PHOEBE] Lecture logg@%s ignorée: %s", comp, exc)
+
+        if not need_manual:
+            return
+
+        coeffs = list(self._PHOEBE_LD_COEFFS_DEFAULT)
+        logger.info(
+            "[PHOEBE] Correctif atmosphère v2: blackbody + LD manuel (compute=%s, coeffs=%s)",
+            compute,
+            coeffs,
+        )
+        for comp in comps:
+            try:
+                b.set_value("atm", "blackbody", compute=compute, component=comp)
+            except Exception:
+                b.set_value("atm", "blackbody", component=comp)
+            b.set_value("ld_mode_bol", "manual", component=comp)
+            b.set_value("ld_func_bol", "quadratic", component=comp)
+            b.set_value("ld_coeffs_bol", coeffs, component=comp)
+            try:
+                b[f"ld_mode_bol@{comp}@star@component"] = "manual"
+            except Exception:
+                pass
+
+        for ds in list(b.datasets):
+            for comp in comps:
+                try:
+                    b.set_value("ld_mode", "manual", dataset=ds, component=comp)
+                    b.set_value("ld_func", "quadratic", dataset=ds, component=comp)
+                    b.set_value("ld_coeffs", coeffs, dataset=ds, component=comp)
+                except Exception as exc:
+                    logger.warning("[PHOEBE] ld manuel %s@%s: %s", ds, comp, exc)
+
+        try:
+            mode = b.get_value("ld_mode_bol", component=comps[0], context="component")
+            if mode != "manual":
+                logger.error(
+                    "[PHOEBE] ld_mode_bol toujours %r après correctif — redémarrez NPOAP",
+                    mode,
+                )
+        except Exception:
+            pass
     
     def browse_data_file(self):
         """Ouvre un dialogue pour sélectionner un fichier de données"""
@@ -477,10 +590,20 @@ class BinaryStarsTab(ttk.Frame):
             logger.warning("[Périodogramme] Paramètres invalides: %s", e)
             messagebox.showerror("Erreur", "Vérifiez Min P et Max P (nombres, Min < Max).")
             return
+        bls_detrend = bool(self.perio_bls_detrend_var.get())
+        try:
+            bls_deg = int(self.perio_bls_deg_var.get())
+        except (TypeError, ValueError):
+            bls_deg = 2
+        bls_deg = max(1, min(5, bls_deg))
         logger.debug("[Périodogramme] Lancement thread min_p=%s max_p=%s", min_p, max_p)
-        threading.Thread(target=self._worker_periodogram, args=(algo, min_p, max_p), daemon=True).start()
+        threading.Thread(
+            target=self._worker_periodogram,
+            args=(algo, min_p, max_p, bls_detrend, bls_deg),
+            daemon=True,
+        ).start()
     
-    def _worker_periodogram(self, algo, min_p, max_p):
+    def _worker_periodogram(self, algo, min_p, max_p, bls_detrend=False, bls_deg=2):
         """Exécute le calcul en arrière-plan et met à jour l'interface via after()."""
         res = None
         name = "Périodogramme"
@@ -491,8 +614,17 @@ class BinaryStarsTab(ttk.Frame):
                 res = run_lomb_scargle(self.lc_time, self.lc_flux, min_period=min_p, max_period=max_p)
                 name = "Lomb-Scargle"
             elif algo == "BLS":
-                res = run_bls(self.lc_time, self.lc_flux, min_period=min_p, max_period=max_p)
+                res = run_bls(
+                    self.lc_time,
+                    self.lc_flux,
+                    min_period=min_p,
+                    max_period=max_p,
+                    detrend=bls_detrend,
+                    detrend_degree=bls_deg,
+                )
                 name = "BLS (Transit)"
+                if bls_detrend:
+                    name = f"{name}, détrend °{bls_deg}"
             elif algo == "PLAV":
                 res = run_plavchan(self.lc_time, self.lc_flux, min_period=min_p, max_period=max_p)
                 name = "Plavchan"
@@ -553,11 +685,12 @@ class BinaryStarsTab(ttk.Frame):
                     times = np.linspace(0, period, 100)
                     logger.debug("[PHOEBE] Ajout dataset lc01 avec grille par défaut")
                     self.b.add_dataset('lc', times=times, dataset='lc01')
-            
+
             # Calcul du modèle
             self.progress.start()
             import time
             t0 = time.perf_counter()
+            self._configure_phoebe_ld_if_needed()
             logger.info("[PHOEBE] Lancement run_compute(phoebe01)...")
             self.b.run_compute(compute='phoebe01')
             elapsed = time.perf_counter() - t0
@@ -612,7 +745,14 @@ class BinaryStarsTab(ttk.Frame):
             
         except Exception as e:
             self.progress.stop()
-            messagebox.showerror("Erreur", f"Erreur lors du calcul: {e}")
+            err_msg = str(e)
+            if "ld_coeffs" in err_msg or "out of bounds" in err_msg.lower():
+                err_msg += (
+                    "\n\nCause probable : période courte → log(g) élevé, hors tables "
+                    "d'atmosphère CK2004. Relancez le calcul (correctif automatique) ou "
+                    "réduisez la période / ajustez les masses dans Phoebe."
+                )
+            messagebox.showerror("Erreur", f"Erreur lors du calcul: {err_msg}")
             logger.error(f"Erreur calcul modèle: {e}", exc_info=True)
     
     def fit_parameters(self):
@@ -648,6 +788,7 @@ class BinaryStarsTab(ttk.Frame):
                 self.b['period@binary'] = period
                 self.b['t0@system'] = t0
                 self.b['incl@binary'] = incl
+                self._configure_phoebe_ld_if_needed()
                 self.b.run_compute(compute='phoebe01')
                 fmod = np.asarray(self.b['value@fluxes@lc01@model'], dtype=float)
             except Exception:
