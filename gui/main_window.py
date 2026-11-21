@@ -3,50 +3,15 @@
 import tkinter as tk
 from tkinter import ttk
 
-from gui.home_tab import HomeTab
-try:
-    from gui.night_observation_tab import NightObservationTab
-    NIGHT_OBS_AVAILABLE = True
-except ImportError as e:
-    NIGHT_OBS_AVAILABLE = False
-    NightObservationTab = None
-    print(f"Warning: NightObservationTab non disponible: {e}")
-try:
-    from gui.nina_control_tab import NinaControlTab
-    NINA_CONTROL_AVAILABLE = True
-except ImportError as e:
-    NINA_CONTROL_AVAILABLE = False
-    NinaControlTab = None
-    print(f"Warning: NinaControlTab non disponible: {e}")
-from gui.data_reduction_tab import CCDProcGUI
-from gui.photometry_exoplanets_tab import PhotometryExoplanetsTab
-from gui.asteroid_photometry_tab import AsteroidPhotometryTab
-from gui.transient_photometry_tab import TransientPhotometryTab
-from gui.binary_stars_tab import BinaryStarsTab
-try:
-    from gui.easy_lucky_imaging_tab import EasyLuckyImagingTab
-    EASY_LUCKY_AVAILABLE = True
-except ImportError as e:
-    EASY_LUCKY_AVAILABLE = False
-    EasyLuckyImagingTab = None
-    print(f"Warning: EasyLuckyImagingTab non disponible: {e}")
-try:
-    from gui.variable_stars_tab import VariableStarsTab
-    VARIABLE_STARS_AVAILABLE = True
-except ImportError as e:
-    VARIABLE_STARS_AVAILABLE = False
-    VariableStarsTab = None
-    print(f"Warning: VariableStarsTab non disponible: {e}")
-from gui.cluster_analysis_tab import ClusterAnalysisTab
-from gui.occultations_tab import OccultationsTab
-from gui.spectroscopy_tab import SpectroscopyTab
-try:
-    from gui.catalogues_tab import CataloguesTab
-    CATALOGUES_AVAILABLE = True
-except ImportError as e:
-    CATALOGUES_AVAILABLE = False
-    CataloguesTab = None
-    print(f"Warning: CataloguesTab non disponible: {e}")
+
+def _tab_enabled(key: str, default: bool = True) -> bool:
+    """Lit config/tabs_config.py (build autonome partiel / complet)."""
+    try:
+        from config.tabs_config import ENABLED_TABS
+
+        return bool(ENABLED_TABS.get(key, default))
+    except Exception:
+        return default
 
 
 class MainWindow:
@@ -57,91 +22,148 @@ class MainWindow:
         screen_h = self.root.winfo_screenheight()
         self._configure_window_for_screen(screen_w, screen_h)
 
-        # Configuration du style des onglets, adaptée à la résolution de l'écran.
         self._configure_notebook_style_for_screen(screen_w, screen_h)
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        # ---------------------------
-        # Initialisation des onglets
-        # ---------------------------
+        from gui.home_tab import HomeTab
 
         self.home_tab = HomeTab(self.notebook)
-        if NIGHT_OBS_AVAILABLE:
-            self.night_observation_tab = NightObservationTab(self.notebook)
-        else:
-            self.night_observation_tab = None
-
-        if NINA_CONTROL_AVAILABLE and self.night_observation_tab is not None:
-            self.nina_control_tab = NinaControlTab(self.notebook, self.night_observation_tab)
-        else:
-            self.nina_control_tab = None
-        
-        self.data_reduction_tab = CCDProcGUI(self.notebook)
-        self.photometry_exoplanets_tab = PhotometryExoplanetsTab(self.notebook, base_dir=None)
-        # Analyse des données : intégrée au panneau droit de Photométrie Exoplanètes
-        self.data_analysis_tab = getattr(
-            self.photometry_exoplanets_tab, "data_analysis_tab", None
-        )
-        self.asteroid_photometry_tab = AsteroidPhotometryTab(self.notebook)
-        self.occultations_tab = OccultationsTab(
-            self.notebook,
-            night_observation_tab=self.night_observation_tab if NIGHT_OBS_AVAILABLE else None,
-        )
-        self.transient_photometry_tab = TransientPhotometryTab(self.notebook)
-
-        # Onglet « Étoiles » : binaires, Easy Lucky Imaging, étoiles variables
-        self.stars_container = ttk.Frame(self.notebook)
-        self.stars_notebook = ttk.Notebook(self.stars_container)
-        self.stars_notebook.pack(fill=tk.BOTH, expand=True)
-        self.binary_stars_tab = BinaryStarsTab(self.stars_notebook)
-        self.stars_notebook.add(self.binary_stars_tab, text="⭐ Étoiles Binaires")
-        if EASY_LUCKY_AVAILABLE:
-            self.easy_lucky_imaging_tab = EasyLuckyImagingTab(self.stars_notebook)
-            self.stars_notebook.add(self.easy_lucky_imaging_tab, text="✨ Easy Lucky Imaging")
-        else:
-            self.easy_lucky_imaging_tab = None
-        if VARIABLE_STARS_AVAILABLE:
-            self.variable_stars_tab = VariableStarsTab(self.stars_notebook)
-            self.stars_notebook.add(self.variable_stars_tab, text="🌟 Étoiles Variables")
-        else:
-            self.variable_stars_tab = None
-        self.cluster_analysis_tab = ClusterAnalysisTab(self.notebook)
-        self.spectroscopy_tab = SpectroscopyTab(self.notebook)
-        if CATALOGUES_AVAILABLE:
-            self.catalogues_tab = CataloguesTab(self.notebook)
-        else:
-            self.catalogues_tab = None
-
-        # ---------------------------
-        # Ajout dans le Notebook
-        # ---------------------------
-
         self.notebook.add(self.home_tab, text="🏠 Accueil")
-        if self.night_observation_tab is not None:
-            self.notebook.add(self.night_observation_tab, text="🌙 Observation de la Nuit")
-        if self.nina_control_tab is not None:
-            self.notebook.add(self.nina_control_tab, text="🔭 Contrôle NINA")
-        self.notebook.add(self.data_reduction_tab.frame, text="🛠️ Réduction de Données")
-        self.notebook.add(self.photometry_exoplanets_tab, text="🔭 Photométrie Exoplanètes")
-        self.notebook.add(self.asteroid_photometry_tab.frame, text="🛰️ Photométrie Astéroïdes")
-        self.notebook.add(self.occultations_tab, text="🌑 Occultation")
-        self.notebook.add(self.transient_photometry_tab, text="💥 Photométrie Transitoires")
-        self.notebook.add(self.stars_container, text="⭐ Etoiles")
-        self.notebook.add(self.cluster_analysis_tab, text="📊 Analyse d'amas")
-        self.notebook.add(self.spectroscopy_tab, text="🔬 Spectroscopie")
-        if self.catalogues_tab is not None:
-            self.notebook.add(self.catalogues_tab, text="📚 Catalogues")
 
-        # Gestion fermeture propre
+        self.night_observation_tab = None
+        if _tab_enabled("ephemerides"):
+            try:
+                from gui.night_observation_tab import NightObservationTab
+
+                self.night_observation_tab = NightObservationTab(self.notebook)
+                self.notebook.add(self.night_observation_tab, text="🌙 Observation de la Nuit")
+            except ImportError as e:
+                print(f"Warning: NightObservationTab non disponible: {e}")
+
+        self.nina_control_tab = None
+        if _tab_enabled("nina_control") and self.night_observation_tab is not None:
+            try:
+                from gui.nina_control_tab import NinaControlTab
+
+                self.nina_control_tab = NinaControlTab(self.notebook, self.night_observation_tab)
+                self.notebook.add(self.nina_control_tab, text="🔭 Contrôle NINA")
+            except ImportError as e:
+                print(f"Warning: NinaControlTab non disponible: {e}")
+
+        self.data_reduction_tab = None
+        if _tab_enabled("data_reduction"):
+            from gui.data_reduction_tab import CCDProcGUI
+
+            self.data_reduction_tab = CCDProcGUI(self.notebook)
+            self.notebook.add(self.data_reduction_tab.frame, text="🛠️ Réduction de Données")
+
+        self.photometry_exoplanets_tab = None
+        self.data_analysis_tab = None
+        if _tab_enabled("photometry_exoplanets") or _tab_enabled("data_analysis"):
+            from gui.photometry_exoplanets_tab import PhotometryExoplanetsTab
+
+            self.photometry_exoplanets_tab = PhotometryExoplanetsTab(self.notebook, base_dir=None)
+            self.data_analysis_tab = getattr(
+                self.photometry_exoplanets_tab, "data_analysis_tab", None
+            )
+            self.notebook.add(self.photometry_exoplanets_tab, text="🔭 Photométrie Exoplanètes")
+
+        self.asteroid_photometry_tab = None
+        if _tab_enabled("asteroid_photometry"):
+            from gui.asteroid_photometry_tab import AsteroidPhotometryTab
+
+            self.asteroid_photometry_tab = AsteroidPhotometryTab(self.notebook)
+            self.notebook.add(self.asteroid_photometry_tab.frame, text="🛰️ Photométrie Astéroïdes")
+
+        self.occultations_tab = None
+        if _tab_enabled("occultations"):
+            from gui.occultations_tab import OccultationsTab
+
+            self.occultations_tab = OccultationsTab(
+                self.notebook,
+                night_observation_tab=self.night_observation_tab,
+            )
+            self.notebook.add(self.occultations_tab, text="🌑 Occultation")
+
+        self.transient_photometry_tab = None
+        if _tab_enabled("transient_photometry"):
+            from gui.transient_photometry_tab import TransientPhotometryTab
+
+            self.transient_photometry_tab = TransientPhotometryTab(self.notebook)
+            self.notebook.add(self.transient_photometry_tab, text="💥 Photométrie Transitoires")
+
+        stars_any = any(
+            _tab_enabled(k)
+            for k in ("binary_stars", "easy_lucky_imaging", "variable_stars")
+        )
+        self.stars_container = None
+        self.stars_notebook = None
+        self.binary_stars_tab = None
+        self.easy_lucky_imaging_tab = None
+        self.variable_stars_tab = None
+        if stars_any:
+            self.stars_container = ttk.Frame(self.notebook)
+            self.stars_notebook = ttk.Notebook(self.stars_container)
+            self.stars_notebook.pack(fill=tk.BOTH, expand=True)
+
+            if _tab_enabled("binary_stars"):
+                from gui.binary_stars_tab import BinaryStarsTab
+
+                self.binary_stars_tab = BinaryStarsTab(self.stars_notebook)
+                self.stars_notebook.add(self.binary_stars_tab, text="⭐ Étoiles Binaires")
+
+            if _tab_enabled("easy_lucky_imaging"):
+                try:
+                    from gui.easy_lucky_imaging_tab import EasyLuckyImagingTab
+
+                    self.easy_lucky_imaging_tab = EasyLuckyImagingTab(self.stars_notebook)
+                    self.stars_notebook.add(self.easy_lucky_imaging_tab, text="✨ Easy Lucky Imaging")
+                except ImportError as e:
+                    print(f"Warning: EasyLuckyImagingTab non disponible: {e}")
+
+            if _tab_enabled("variable_stars"):
+                try:
+                    from gui.variable_stars_tab import VariableStarsTab
+
+                    self.variable_stars_tab = VariableStarsTab(self.stars_notebook)
+                    self.stars_notebook.add(self.variable_stars_tab, text="🌟 Étoiles Variables")
+                except ImportError as e:
+                    print(f"Warning: VariableStarsTab non disponible: {e}")
+
+            if self.stars_notebook.index("end") > 0:
+                self.notebook.add(self.stars_container, text="⭐ Etoiles")
+
+        self.cluster_analysis_tab = None
+        if _tab_enabled("cluster_analysis"):
+            from gui.cluster_analysis_tab import ClusterAnalysisTab
+
+            self.cluster_analysis_tab = ClusterAnalysisTab(self.notebook)
+            self.notebook.add(self.cluster_analysis_tab, text="📊 Analyse d'amas")
+
+        self.spectroscopy_tab = None
+        if _tab_enabled("spectroscopy"):
+            from gui.spectroscopy_tab import SpectroscopyTab
+
+            self.spectroscopy_tab = SpectroscopyTab(self.notebook)
+            self.notebook.add(self.spectroscopy_tab, text="🔬 Spectroscopie")
+
+        self.catalogues_tab = None
+        if _tab_enabled("catalogues"):
+            try:
+                from gui.catalogues_tab import CataloguesTab
+
+                self.catalogues_tab = CataloguesTab(self.notebook)
+                self.notebook.add(self.catalogues_tab, text="📚 Catalogues")
+            except ImportError as e:
+                print(f"Warning: CataloguesTab non disponible: {e}")
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_quit)
 
     def _configure_window_for_screen(self, screen_w: int, screen_h: int) -> None:
-        """Adapte la taille de la fenêtre à la résolution utilisateur."""
         is_small_screen = screen_w <= 1366 or screen_h <= 768
         if is_small_screen:
-            # Sur petits écrans, maximiser évite que des zones basses soient cachées.
             try:
                 self.root.state("zoomed")
             except tk.TclError:
@@ -158,7 +180,6 @@ class MainWindow:
         self.root.minsize(min_w, min_h)
 
     def _configure_notebook_style_for_screen(self, screen_w: int, screen_h: int) -> None:
-        """Réduit la taille des onglets pour les résolutions faibles."""
         if screen_w <= 1366 or screen_h <= 768:
             tab_font = ("Arial", 7, "bold")
             tab_padding = (6, 8)

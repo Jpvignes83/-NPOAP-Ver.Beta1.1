@@ -35,25 +35,46 @@ dans `external_apps/lite/optionnels/`.
 
 ## Produire l’archive (mainteneur)
 
+### Complet
+
 ```bat
 construire_distribution_autonome.bat
+construire_distribution_autonome.bat full
 ```
+
+### Partiel (profil)
+
+```bat
+construire_distribution_autonome.bat list
+construire_distribution_autonome.bat exoplanetes
+construire_distribution_autonome.bat asteroides
+construire_distribution_autonome.bat binaires --no-zip
+```
+
+| Profil | Onglets / contenu |
+|--------|-------------------|
+| `full` | Tous les onglets + pip autonome |
+| `exoplanetes` | Accueil, Observation, NINA, Réduction, Photométrie Exoplanètes (ExoPlanetPie) + HOPS |
+| `asteroides` | Accueil, Observation, NINA, Réduction, Photométrie astéroïdes |
+| `binaires` | Accueil, Observation, NINA, Réduction, Étoiles binaires |
+
+Chaque profil écrit `config/tabs_config.py` (`ENABLED_TABS`) et élague les accessoires Lite non nécessaires. L’UI lit ces drapeaux au démarrage.
 
 Enchaîne :
 
 1. `python build/assemble_external_apps_lite.py --clean`
-2. `python build/build_autonome.py`
+2. `python build/build_autonome.py --profile <nom>`
 
 Sorties :
 
-- `build/distributions/autonome/`
-- `build/distributions/NPOAP_AUTONOME_YYYYMMDD_HHMM.zip`
+- `build/distributions/autonome/` ou `autonome_<profil>/`
+- `build/distributions/NPOAP_AUTONOME[_profil]_YYYYMMDD_HHMM.zip`
 
 Sans ZIP / sans réassemblage lite :
 
 ```bat
-python build\build_autonome.py --no-zip
-python build\build_autonome.py --skip-assemble-lite
+python build\build_autonome.py --profile exoplanetes --no-zip
+python build\build_autonome.py --skip-assemble-lite --profile binaires
 ```
 
 Régénérer uniquement le tree Lite dans le dépôt :

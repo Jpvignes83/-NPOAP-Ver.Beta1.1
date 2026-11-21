@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Construit la distribution NPOAP AUTONOME Lite :
+Construit la distribution NPOAP AUTONOME Lite (complète ou partielle) :
   - assemble d'abord external_apps/lite/{core,optionnels,accessories}
   - recopie le runtime (core, gui, …) + lite vendu
+  - applique un profil (--profile) : onglets + requirements + accessoires
   - scripts d'installation cœur + optionnels + WSL very_Lite
-  - requirements.txt = requirements_install_autonome.txt (cœur ∪ optionnels)
 
-Sortie : build/distributions/autonome/  (+ ZIP optionnel)
+Sortie :
+  build/distributions/autonome/            (profil full)
+  build/distributions/autonome_<profil>/   (profil partiel)
+  + ZIP optionnel
 """
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 import zipfile
@@ -19,11 +23,13 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT_ROOT = Path(__file__).resolve().parent / "distributions" / "autonome"
+DIST_ROOT = Path(__file__).resolve().parent / "distributions"
 
 # Assure que build/ est importable
 if str(ROOT / "build") not in sys.path:
     sys.path.insert(0, str(ROOT / "build"))
+
+from profiles_autonome import get_profile, list_profiles  # noqa: E402
 
 # Dossiers applicatifs a recopier integralement (hors exclusions)
 COPY_DIRS = [
@@ -71,7 +77,6 @@ COPY_ROOT_FILES = [
     "repair_astroenv_pip_permissions.bat",
     "test_application_launch.bat",
     "test_installation.py",
-    # Scripts PowerShell requis par installation.bat
     "normalize_requirements_utf8.ps1",
     "installation_miniconda_download.ps1",
 ]
@@ -114,78 +119,136 @@ def copy_tree(src: Path, dst: Path) -> int:
         rel = item.relative_to(src)
         target = dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            try:
+                target.chmod(0o666)
+            except Exception:
+                pass
         shutil.copy2(item, target)
+        try:
+            target.chmod(0o666)
+        except Exception:
+            pass
         n += 1
     return n
 
 
-def write_tabs_all_enabled(config_dir: Path) -> None:
+def _rmtree_force(path: Path) -> None:
+    if not path.exists():
+        return
+
+    # OneDrive / Windows : lever lecture seule avant suppression
+    for p in path.rglob("*"):
+        try:
+            if p.is_file() or p.is_symlink():
+                p.chmod(0o666)
+        except Exception:
+            pass
+
+    def _onerror(func, p, _exc_info):
+        try:
+            Path(p).chmod(0o666)
+            func(p)
+        except Exception:
+            pass
+
+    shutil.rmtree(path, onerror=_onerror)
+
+
+def write_tabs_config(config_dir: Path, tabs: dict[str, bool], profile: str) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
-    content = """# Configuration des onglets actives
-# Distribution AUTONOME : tous les onglets
-
-ENABLED_TABS = {
-    'home': True,
-    'ephemerides': True,
-    'nina_control': True,
-    'photometry_exoplanets': True,
-    'data_reduction': True,
-    'asteroid_photometry': True,
-    'transient_photometry': True,
-    'data_analysis': True,
-    'binary_stars': True,
-    'easy_lucky_imaging': True,
-    'cluster_analysis': True,
-    'spectroscopy': True,
-    'catalogues': True,
-}
-"""
-    (config_dir / "tabs_config.py").write_text(content, encoding="utf-8")
+    lines = [
+        "# Configuration des onglets actives",
+        f"# Distribution AUTONOME — profil: {profile}",
+        "",
+        "ENABLED_TABS = {",
+    ]
+    for key, val in tabs.items():
+        lines.append(f"    {key!r}: {val},")
+    lines.append("}")
+    lines.append("")
+    (config_dir / "tabs_config.py").write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_dist_readme(out: Path) -> None:
-    text = """# NPOAP — Distribution AUTONOME Lite (Beta 1.1)
+def prune_accessories(out: Path, accessories: dict[str, bool]) -> None:
+    """Retire les accessoires Lite non demandés par le profil partiel."""
+    lite = out / "external_apps" / "lite"
+    if not accessories.get("shobs_flux", True):
+        for p in (
+            lite / "accessories" / "shobs_flux",
+            out / "external_apps" / "shobs_flux",
+        ):
+            if p.exists():
+                _rmtree_force(p)
+                print(f"  [PRUNE] {p.relative_to(out)}")
+    if not accessories.get("hops", True):
+        for p in (
+            lite / "accessories" / "hops",
+            out / "external_apps" / "hops",
+            out / "external_apps" / "hopsmodified.zip",
+        ):
+            if p.exists():
+                if p.is_dir():
+                    _rmtree_force(p)
+                else:
+                    p.unlink()
+                print(f"  [PRUNE] {p.relative_to(out)}")
+    if not accessories.get("optionnels_installers", True):
+        # Garde requirements + WSL very_Lite ; retire installateurs lourds optionnels
+        opt = lite / "optionnels"
+        heavy = [
+            "install_kbmod_wsl.bat",
+            "install_msvc_build_tools.bat",
+            "install_cmake.bat",
+            "install_phoebe_astroenv.bat",
+            "INSTALLER_SORA_ASTROENV.bat",
+            "scripts/install_kbmod_wsl.sh",
+            "scripts/kbmod_wsl_detect.py",
+            "scripts/ensure_wsl_astroenv_py311.sh",
+            "docs/INSTALL_KBMOD_WSL.md",
+        ]
+        for rel in heavy:
+            p = opt / rel
+            if p.exists():
+                p.unlink()
+                print(f"  [PRUNE] {p.relative_to(out)}")
 
-Archive **autosuffisante** : code cœur, optionnels et accessoires en versions
-**Lite** sous `external_apps/lite/`, plus runtime à la racine.
 
-## Layout Lite vendu
+def write_dist_readme(out: Path, profile: str, meta: dict) -> None:
+    tabs_on = [k for k, v in meta["tabs"].items() if v]
+    text = f"""# NPOAP — Distribution AUTONOME Lite (profil `{profile}`)
 
-| Chemin | Contenu |
-|--------|---------|
-| `external_apps/lite/core/` | Sources core NPOAP |
-| `external_apps/lite/optionnels/` | Requirements + installateurs + WSL very_Lite |
-| `external_apps/lite/accessories/shobs_flux/` | SHOBS-FLUX |
-| `external_apps/lite/accessories/hops/` | HOPS modifié (`hops-master/`) |
+{meta["description"]}
 
-Le runtime (`core/`, `gui/`, …) à la racine reste celui utilisé par `main.py`.
-`external_apps/lite/` est la copie vendue autonome (régénérable).
+## Onglets actifs
+
+{chr(10).join(f"- `{t}`" for t in tabs_on)}
+
+## Requirements pip
+
+`requirements.txt` ← `{meta["requirements"]}`
+
+## Accessoires Lite
+
+| Accessoire | Inclus |
+|------------|--------|
+| SHOBS-FLUX | {"oui" if meta["accessories"].get("shobs_flux") else "non"} |
+| HOPS | {"oui" if meta["accessories"].get("hops") else "non"} |
+| Installateurs optionnels (KBMOD/MSVC/…) | {"oui" if meta["accessories"].get("optionnels_installers") else "non"} |
 
 ## Installation rapide
 
-1. Installer [Miniconda](https://docs.conda.io/en/latest/miniconda.html) (Python 3.11).
-2. Double-cliquer **`INSTALLER_NPOAP_AUTONOME_WINDOWS.bat`**
-   (crée `astroenv` + `pip install -r requirements.txt` = cœur ∪ optionnels PyPI).
-3. Lancer **`LANCER_NPOAP_ASTROENV.bat`**.
+1. Installer Miniconda (Python 3.11).
+2. `INSTALLER_NPOAP_ASTROENV_WINDOWS.bat` ou `INSTALLER_NPOAP_AUTONOME_WINDOWS.bat`
+3. `LANCER_NPOAP_ASTROENV.bat`
 
-## Optionnels système (hors pip)
+## Rebuild
 
-- WSL allégé : `install_wsl.bat` puis `install_ubuntu_wsl_very_lite.bat`
-- Astrometry / KBMOD : voir `docs/WSL_VERY_LITE.md` et `docs/INSTALL_KBMOD_WSL.md`
-- MSVC / CMake : `install_optionnels.bat` ou scripts individuels
+```bat
+construire_distribution_autonome.bat {profile}
+```
 
-## Fichiers requirements
-
-| Fichier | Rôle |
-|---------|------|
-| `requirements.txt` | Copie du profil autonome (install unique) |
-| `requirements_install_autonome.txt` | Source du profil autonome |
-| `requirements_install_core.txt` | Cœur seul |
-| `requirements_install_optionnels.txt` | Optionnels PyPI seuls |
-
-Non inclus (volontairement) : Prospector/FSPS compilé, KBMOD compilé, indexs
-astrometry multi-Go, CuPy. Les *scripts* Lite pour les installer sont dans
-`external_apps/lite/optionnels/`.
+Profils : `full`, `exoplanetes`, `asteroides`, `binaires`.
 """
     (out / "README_DISTRIBUTION_AUTONOME.md").write_text(text, encoding="utf-8")
 
@@ -199,15 +262,28 @@ def make_zip(src_dir: Path, zip_path: Path) -> None:
                 zf.write(f, f.relative_to(src_dir.parent).as_posix())
 
 
-def build(make_archive: bool = True, skip_assemble_lite: bool = False) -> Path:
+def out_dir_for_profile(profile: str) -> Path:
+    if profile == "full":
+        return DIST_ROOT / "autonome"
+    return DIST_ROOT / f"autonome_{profile}"
+
+
+def build(
+    profile: str = "full",
+    make_archive: bool = True,
+    skip_assemble_lite: bool = False,
+) -> Path:
     if not (ROOT / "main.py").exists():
         raise SystemExit(f"main.py introuvable dans {ROOT}")
 
-    autonome_req = ROOT / "requirements_install_autonome.txt"
-    if not autonome_req.exists():
-        raise SystemExit(f"Manquant: {autonome_req}")
+    meta = get_profile(profile)
+    req_name = meta["requirements"]
+    req_path = ROOT / req_name
+    if not req_path.exists():
+        raise SystemExit(f"Manquant: {req_path}")
 
-    # 1) Assembler external_apps/lite (core + optionnels + accessories)
+    out_root = out_dir_for_profile(profile)
+
     if not skip_assemble_lite:
         print("[AUTONOME] Assemblage external_apps/lite ...")
         from assemble_external_apps_lite import assemble as assemble_lite
@@ -216,12 +292,13 @@ def build(make_archive: bool = True, skip_assemble_lite: bool = False) -> Path:
     else:
         print("[AUTONOME] SKIP assemblage lite (--skip-assemble-lite)")
 
-    if OUT_ROOT.exists():
-        shutil.rmtree(OUT_ROOT)
-    OUT_ROOT.mkdir(parents=True)
+    if out_root.exists():
+        _rmtree_force(out_root)
+    out_root.mkdir(parents=True)
 
+    print(f"[AUTONOME] Profil : {profile}")
     print(f"[AUTONOME] Source : {ROOT}")
-    print(f"[AUTONOME] Sortie : {OUT_ROOT}")
+    print(f"[AUTONOME] Sortie : {out_root}")
 
     total = 0
     for name in COPY_DIRS:
@@ -229,60 +306,86 @@ def build(make_archive: bool = True, skip_assemble_lite: bool = False) -> Path:
         if not src.exists():
             print(f"  [SKIP] dossier absent: {name}")
             continue
-        n = copy_tree(src, OUT_ROOT / name)
+        n = copy_tree(src, out_root / name)
         print(f"  [OK] {name}/  ({n} fichiers)")
         total += n
 
-    # Garantit la présence du layout lite même si COPY_DIRS a déjà tout pris
-    lite_src = ROOT / "external_apps" / "lite"
-    if lite_src.is_dir():
-        n = copy_tree(lite_src, OUT_ROOT / "external_apps" / "lite")
-        print(f"  [OK] external_apps/lite/ synchronise ({n} fichiers)")
-        total += n
+    # external_apps/lite est deja inclus via COPY_DIRS["external_apps"]
 
     for name in COPY_ROOT_FILES:
         src = ROOT / name
         if src.exists():
-            shutil.copy2(src, OUT_ROOT / name)
+            shutil.copy2(src, out_root / name)
             total += 1
             print(f"  [OK] {name}")
         else:
             print(f"  [SKIP] {name}")
 
-    # requirements.txt = profil autonome
-    shutil.copy2(autonome_req, OUT_ROOT / "requirements.txt")
-    print("  [OK] requirements.txt <- requirements_install_autonome.txt")
+    shutil.copy2(req_path, out_root / "requirements.txt")
+    print(f"  [OK] requirements.txt <- {req_name}")
 
-    write_tabs_all_enabled(OUT_ROOT / "config")
-    print("  [OK] config/tabs_config.py (tous onglets)")
+    write_tabs_config(out_root / "config", meta["tabs"], profile)
+    print(f"  [OK] config/tabs_config.py (profil {profile})")
 
-    write_dist_readme(OUT_ROOT)
+    print("  [INFO] Elagage accessoires selon profil...")
+    prune_accessories(out_root, meta["accessories"])
 
-    # Marqueur de build
+    write_dist_readme(out_root, profile, meta)
+
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lite_ok = (OUT_ROOT / "external_apps" / "lite" / "MANIFEST.json").exists()
-    (OUT_ROOT / "BUILD_AUTONOME.txt").write_text(
+    lite_ok = (out_root / "external_apps" / "lite" / "MANIFEST.json").exists()
+    manifest = {
+        "profile": profile,
+        "description": meta["description"],
+        "requirements": req_name,
+        "tabs": meta["tabs"],
+        "accessories": meta["accessories"],
+        "built": stamp,
+        "files_copied": total,
+        "lite_ok": lite_ok,
+    }
+    (out_root / "BUILD_AUTONOME.txt").write_text(
         f"NPOAP distribution AUTONOME Lite\n"
+        f"Profile: {profile}\n"
         f"Built: {stamp}\n"
+        f"Requirements: {req_name}\n"
         f"Root files+dirs copied: {total}\n"
         f"external_apps/lite: {'OK' if lite_ok else 'MISSING'}\n",
+        encoding="utf-8",
+    )
+    (out_root / "BUILD_PROFILE.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 
     zip_path = None
     if make_archive:
         stamp_file = datetime.now().strftime("%Y%m%d_%H%M")
-        zip_path = OUT_ROOT.parent / f"NPOAP_AUTONOME_{stamp_file}.zip"
+        suffix = "" if profile == "full" else f"_{profile}"
+        zip_path = DIST_ROOT / f"NPOAP_AUTONOME{suffix}_{stamp_file}.zip"
         print(f"[AUTONOME] Compression {zip_path.name} ...")
-        make_zip(OUT_ROOT, zip_path)
+        make_zip(out_root, zip_path)
         print(f"[AUTONOME] ZIP: {zip_path} ({zip_path.stat().st_size / 1e6:.1f} Mo)")
 
     print("[AUTONOME] Termine.")
-    return zip_path or OUT_ROOT
+    return zip_path or out_root
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Build NPOAP distribution autonome Lite")
+    p = argparse.ArgumentParser(
+        description="Build NPOAP distribution autonome Lite (complet ou partiel)"
+    )
+    p.add_argument(
+        "--profile",
+        "-p",
+        default="full",
+        help="Profil de build (full, core, reduction, exoplanets, …)",
+    )
+    p.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="Liste les profils disponibles et quitte",
+    )
     p.add_argument("--no-zip", action="store_true", help="Ne pas creer le ZIP")
     p.add_argument(
         "--skip-assemble-lite",
@@ -290,8 +393,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Ne pas regenerer external_apps/lite avant copie",
     )
     args = p.parse_args(argv)
+
+    if args.list_profiles:
+        print("Profils disponibles :")
+        for name, desc in list_profiles():
+            print(f"  {name:14s}  {desc}")
+        return 0
+
     try:
-        build(make_archive=not args.no_zip, skip_assemble_lite=args.skip_assemble_lite)
+        build(
+            profile=args.profile,
+            make_archive=not args.no_zip,
+            skip_assemble_lite=args.skip_assemble_lite,
+        )
     except Exception as exc:
         print(f"[AUTONOME] ERREUR: {exc}", file=sys.stderr)
         return 1
