@@ -575,13 +575,21 @@ attrib -R "!INSTALL_DIR!\requirements.txt" >nul 2>&1
 attrib -R "!INSTALL_DIR!\requirements_install_core.txt" >nul 2>&1
 
 REM pip exige des fichiers requirements en UTF-8 ^(pas UTF-16 / Unicode Bloc-notes^)
-set "NORM_PS=!INSTALL_BAT_DIR!normalize_requirements_utf8.ps1"
-if exist "!NORM_PS!" (
+set "NORM_PS="
+if exist "!INSTALL_BAT_DIR!normalize_requirements_utf8.ps1" set "NORM_PS=!INSTALL_BAT_DIR!normalize_requirements_utf8.ps1"
+if not defined NORM_PS if exist "!INSTALL_DIR!\normalize_requirements_utf8.ps1" set "NORM_PS=!INSTALL_DIR!\normalize_requirements_utf8.ps1"
+if not defined NORM_PS if exist "%~dp0normalize_requirements_utf8.ps1" set "NORM_PS=%~dp0normalize_requirements_utf8.ps1"
+if defined NORM_PS (
     echo Normalisation UTF-8 des fichiers requirements pour pip...
+    echo   Script: !NORM_PS!
     powershell -NoProfile -ExecutionPolicy Bypass -File "!NORM_PS!" "!INSTALL_DIR!\requirements_install_core.txt"
     powershell -NoProfile -ExecutionPolicy Bypass -File "!NORM_PS!" "!INSTALL_DIR!\requirements.txt"
+    if exist "!INSTALL_DIR!\requirements_install_autonome.txt" (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "!NORM_PS!" "!INSTALL_DIR!\requirements_install_autonome.txt"
+    )
 ) else (
     echo %YELLOW%ATTENTION: normalize_requirements_utf8.ps1 absent - encodage requirements non corrige.%RESET%
+    echo %YELLOW%Placez normalize_requirements_utf8.ps1 a cote de installation.bat puis relancez.%RESET%
 )
 
 echo Activation de l'environnement %ENV_NAME% ^(activate.bat^)...

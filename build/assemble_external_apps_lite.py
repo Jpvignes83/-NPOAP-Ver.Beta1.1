@@ -57,6 +57,8 @@ OPTIONNELS_ROOT_FILES = [
     "install_phoebe_astroenv.bat",
     "install_sora_analysis.bat",
     "INSTALLER_SORA_ASTROENV.bat",
+    "normalize_requirements_utf8.ps1",
+    "installation_miniconda_download.ps1",
 ]
 
 OPTIONNELS_SCRIPTS = [

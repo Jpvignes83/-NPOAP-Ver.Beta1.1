@@ -71,6 +71,9 @@ COPY_ROOT_FILES = [
     "repair_astroenv_pip_permissions.bat",
     "test_application_launch.bat",
     "test_installation.py",
+    # Scripts PowerShell requis par installation.bat
+    "normalize_requirements_utf8.ps1",
+    "installation_miniconda_download.ps1",
 ]
 
 SKIP_DIR_NAMES = {

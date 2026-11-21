@@ -68,6 +68,9 @@ Hors WSL (pas dans very_Lite) : NPOAP GUI, Conda Windows `astroenv`, NOVA Astrom
 
 Prérequis : WSL2 déjà installé (`install_wsl.bat`, redémarrage si demandé).
 
+WSL recommandé : **3.0.3+** ([release Microsoft](https://github.com/microsoft/WSL/releases/tag/3.0.3)).  
+Mise à jour : `wsl --update`, ou `install_wsl.bat msi` (installe le MSI GitHub x64).
+
 ```bat
 install_ubuntu_wsl_very_lite.bat
 ```

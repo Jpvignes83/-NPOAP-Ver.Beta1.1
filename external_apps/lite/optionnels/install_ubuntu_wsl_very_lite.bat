@@ -23,9 +23,12 @@ echo ============================================================
 echo NPOAP - WSL Ubuntu very_Lite
 echo ============================================================
 echo Distro   : %DISTRO_NAME%
-echo Rootfs   : Ubuntu Base %UBUNTU_VER% (~29 Mo telecharges)
+echo Rootfs   : Ubuntu Base %UBUNTU_VER% (~29 Mo)
 echo Profil   : %PROFILE%  ^(core ^| astrometry ^| full^)
 echo Install  : %INSTALL_DIR%
+echo.
+echo IMPORTANT : ne PAS extraire le .tar.gz ^(Explorateur/7-Zip echouent^).
+echo            wsl --import consomme l'archive telle quelle.
 echo.
 echo Contenu systeme : toolchain build + gfortran + git + python3
 if /i "!PROFILE!"=="core" (
@@ -63,6 +66,18 @@ if not "!DISTRO_EXISTS!"=="0" (
 if not exist "%DOWNLOAD_DIR%" mkdir "%DOWNLOAD_DIR%"
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
+REM Reutilise un tarball deja telecharge (Downloads ou cache NPOAP), sans extraction.
+if not exist "%TARBALL_PATH%" if exist "%USERPROFILE%\Downloads\ubuntu-base-24.04.5-base-amd64.tar.gz" (
+  echo [INFO] Copie depuis Downloads : ubuntu-base-24.04.5-base-amd64.tar.gz
+  copy /Y "%USERPROFILE%\Downloads\ubuntu-base-24.04.5-base-amd64.tar.gz" "%TARBALL_PATH%" >nul
+)
+if not exist "%TARBALL_PATH%" if exist "%USERPROFILE%\Downloads\ubuntu-base-24.04.3-base-amd64.tar.gz" (
+  echo [INFO] Copie depuis Downloads : ubuntu-base-24.04.3-base-amd64.tar.gz
+  set "TARBALL=ubuntu-base-24.04.3-base-amd64.tar.gz"
+  set "TARBALL_PATH=%DOWNLOAD_DIR%\!TARBALL!"
+  copy /Y "%USERPROFILE%\Downloads\ubuntu-base-24.04.3-base-amd64.tar.gz" "!TARBALL_PATH!" >nul
+)
+
 if exist "%TARBALL_PATH%" (
   echo [OK] Tarball deja present : %TARBALL_PATH%
 ) else (
@@ -97,9 +112,12 @@ echo [INFO] Definition comme distro par defaut...
 wsl --set-default "%DISTRO_NAME%" >nul 2>&1
 
 :bootstrap_only
+REM Racine NPOAP ou external_apps\lite\optionnels\
 set "BOOT_SH=%~dp0scripts\bootstrap_npoap_wsl_very_lite.sh"
-if not exist "%BOOT_SH%" (
-  echo ERREUR : script introuvable : %BOOT_SH%
+if not exist "!BOOT_SH!" set "BOOT_SH=%~dp0..\..\..\..\scripts\bootstrap_npoap_wsl_very_lite.sh"
+if not exist "!BOOT_SH!" (
+  echo ERREUR : script introuvable : bootstrap_npoap_wsl_very_lite.sh
+  echo Cherche : %%~dp0scripts\  ou scripts\ a la racine NPOAP
   goto :fail
 )
 
