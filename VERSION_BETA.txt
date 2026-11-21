@@ -1,5 +1,5 @@
-﻿NPOAP Ver.Beta 2.0
-Successor of -NPOAP-Ver.Beta1.0 / Ver.Beta 1.1
+﻿NPOAP Ver.Beta 1.1
+Successor of -NPOAP-Ver.Beta1.0
 Distribution AUTONOME Lite : external_apps/lite/{core,optionnels,accessories}
 WSL Ubuntu-NPOAP-Lite (very_Lite) pour astrometry / KBMOD / toolchain
 Includes SHOBS-FLUX instrument characterization integration.
